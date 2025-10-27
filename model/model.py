@@ -405,3 +405,70 @@ class USPTO500MTModel(torch.nn.Module):
                 break
 
         return res, log_logits, belong
+
+class JointModel(torch.nn.Module):
+    def __init__(self, encoder, condition_encoder, dim, heads, dropout=0.1, cls_out_dim=2):
+        super(JointModel, self).__init__()
+        # 共享编码器
+        self.encoder = encoder
+        self.condition_encoder = condition_encoder
+        
+        # 分类任务头（例如：反应类型分类）
+        self.cls_head = torch.nn.Sequential(
+            torch.nn.Linear(dim, dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(dim, cls_out_dim)  # 2类分类
+        )
+        
+        # 回归任务头（例如：产率预测）
+        self.reg_head = torch.nn.Sequential(
+            torch.nn.Linear(dim, dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(dim, dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(dim, dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(dim, dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(dim, 1)  # 能垒1个值
+        )
+        
+        # 共享池化层（与原有模型保持一致）
+        self.pool_keys = torch.nn.Parameter(torch.randn(1, 1, dim))
+        self.pooler = DotMhAttn(
+            Qdim=dim, Kdim=dim, Vdim=dim, Odim=dim,
+            emb_dim=dim, num_heads=heads, dropout=dropout
+        )
+        self.xln = torch.nn.LayerNorm(dim)
+
+    def forward(self, reac_graph, prod_graph, conditions=None, cross_mask=None):
+        # 共享特征提取
+        if conditions is not None and self.condition_encoder is not None:
+            condition_dict = self.condition_encoder(conditions)
+        else:
+            condition_dict = {}
+        x_reac, x_prod, _, _ = self.encoder(
+            reac_graph=reac_graph, reac_batched_condition=condition_dict,
+            prod_graph=prod_graph, prod_batched_condition=condition_dict
+        )
+        
+        # 池化得到反应级特征
+        x_reac = graph2batch(x_reac, reac_graph.batch_mask)
+        x_prod = graph2batch(x_prod, prod_graph.batch_mask)
+        memory = torch.cat([x_reac, x_prod], dim=1)
+        memory_mask = torch.logical_not(torch.cat([reac_graph.batch_mask, prod_graph.batch_mask], dim=1))
+        
+        pool_key = self.pool_keys.repeat(memory.shape[0], 1, 1)
+        pooled_results, _ = self.pooler(
+            query=pool_key, key=memory, value=memory,
+            key_padding_mask=memory_mask, attn_mask=cross_mask
+        )
+        reaction_emb = self.xln(pooled_results.squeeze(dim=1))
+        
+        # 双任务输出
+        cls_out = self.cls_head(reaction_emb)  # 分类输出
+        reg_out = self.reg_head(reaction_emb)  # 回归输出
+        return cls_out, reg_out

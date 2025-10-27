@@ -2,6 +2,7 @@ import torch
 import torch_geometric
 import numpy as np
 from numpy import concatenate as npcat
+import pandas as pd
 from rdkit import Chem
 
 from .chemistry_parse import get_reaction_core
@@ -252,3 +253,43 @@ def seq_inf_fn(batch):
         out_ans.append([x[3] for x in batch])
     return out_ans
 
+
+class JointDataset(RAlignDatasetBase):
+    """继承RAlignDatasetBase的双标签数据集（分类+回归）"""
+    def __init__(
+        self, reactions, is_elementary, barrier
+    ):
+        super(JointDataset, self).__init__(reactions)
+        self.cls_label = is_elementary
+        self.reg_label = barrier
+
+    def __getitem__(self, idx):
+        # 基础信息提取
+        reac_mol, prod_mol = self.get_aligned_graphs(idx)
+        
+        # 双标签提取
+        cls_label = self.cls_label[idx]  # 分类标签（整数）
+        reg_label = self.reg_label[idx]  # 回归标签（浮点数）
+        
+        return reac_mol, prod_mol, cls_label, reg_label
+
+
+def joint_colfn(batch):
+    """
+    处理双标签批次数据，拼接图结构和标签
+    输入: batch = [(reac_graph, prod_graph, cls_label, reg_label), ...]
+    输出: 拼接后的图、分类标签、回归标签
+    """
+    reacs, prods, cls_labels, reg_labels = [], [], [], []
+    
+    # 提取批次中的各个部分
+    for x in batch:
+        reacs.append(x[0])
+        prods.append(x[1])
+        cls_labels.append(x[2])
+        reg_labels.append(x[3])
+    
+    return graph_col_fn(reacs), graph_col_fn(prods), \
+        torch.tensor(cls_labels, dtype=torch.long), \
+        torch.tensor(reg_labels, dtype=torch.float32) # NaN会被保留为torch.nan
+        

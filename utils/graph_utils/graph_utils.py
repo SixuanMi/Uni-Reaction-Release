@@ -6,6 +6,10 @@ import numpy as np
 import rdkit
 from rdkit import Chem
 
+from rdkit.Chem.rdmolfiles import SmilesParserParams
+# 创建SMILES解析参数对象，并设置removeHs=False（保留显式氢）
+params = SmilesParserParams()
+params.removeHs = False
 
 def smiles2graph(smiles_string, with_amap=False):
     """
@@ -14,7 +18,7 @@ def smiles2graph(smiles_string, with_amap=False):
     :return: graph object
     """
 
-    mol = Chem.MolFromSmiles(smiles_string)
+    mol = Chem.MolFromSmiles(smiles_string, params=params)
     if with_amap:
         max_amap = max([atom.GetAtomMapNum() for atom in mol.GetAtoms()])
         for atom in mol.GetAtoms():

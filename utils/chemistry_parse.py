@@ -3,8 +3,9 @@ from rdkit import Chem
 import numpy as np
 from typing import Dict
 
+from rdkit.Chem.rdmolfiles import SmilesParserParams
 
-def get_mol(smiles: str, kekulize: bool = False) -> Chem.Mol:
+def get_mol(smiles: str, kekulize: bool = False, removeHs: bool = False) -> Chem.Mol:
     """SMILES string to Mol.
     Parameters
     ----------
@@ -13,7 +14,11 @@ def get_mol(smiles: str, kekulize: bool = False) -> Chem.Mol:
     kekulize: bool,
         Whether to kekulize the molecule
     """
-    mol = Chem.MolFromSmiles(smiles)
+    # 创建SMILES解析参数对象，并设置removeHs=False（保留显式氢）
+    params = SmilesParserParams()
+    params.removeHs = removeHs
+
+    mol = Chem.MolFromSmiles(smiles, params=params)
     if mol is not None and kekulize:
         Chem.Kekulize(mol)
     return mol

@@ -354,3 +354,165 @@ def train_mol_yield_freeze(
             warmup_sher.step()
 
     return np.mean(los_cur)
+
+
+def train_joint(
+    loader, model, optimizer, device, lambda_reg=0.5,  # lambda为回归损失权重
+    total_heads=None, local_heads=0, warmup=False, has_reag=True   # 适配无条件场景
+):
+    model.train()
+    total_loss = []
+    if warmup:
+        warmup_iters = len(loader) - 1
+        warmup_sher = warmup_lr_scheduler(optimizer, warmup_iters, 5e-2)
+    
+    for batch_data in tqdm(loader):
+        # 假设batch包含分类标签（cls_label）和回归标签（reg_label）
+        if has_reag:
+            reac, prod, reag, cls_label, reg_label = batch_data
+            reag = reag.to(device)
+        else:
+            reac, prod, cls_label, reg_label = batch_data
+            reag = None
+        
+        # 数据迁移到设备
+        reac, prod = reac.to(device), prod.to(device)
+        cls_label = cls_label.to(device)  # 分类标签（整数，必选）
+        reg_label = reg_label.to(device)  # 回归标签（可能含NaN，float32）
+        
+        # 生成掩码（与原有逻辑一致）
+        if local_heads > 0:
+            cross_mask = generate_local_global_mask(
+                reac, prod, 1, total_heads, local_heads
+            )
+        else:
+            cross_mask = None
+        
+        # 前向传播
+        cls_out, reg_out = model(reac, prod, reag, cross_mask=cross_mask)
+        
+        # --------------------------
+        # 分类损失：对所有样本计算
+        # --------------------------
+        cls_loss = torch.nn.functional.cross_entropy(cls_out, cls_label)  # 分类损失
+        
+        # --------------------------
+        # 回归损失：仅对非NaN标签的样本计算
+        # --------------------------
+        # 筛选有效回归样本（非NaN）
+        reg_valid_mask = torch.isfinite(reg_label)  # 有效样本为True，NaN为False
+        num_valid_reg = reg_valid_mask.sum().item()
+        
+        if num_valid_reg > 0:
+            # 只对有效样本计算MSE
+            reg_pred_valid = reg_out.squeeze()[reg_valid_mask]
+            reg_label_valid = reg_label[reg_valid_mask]
+            reg_loss = torch.nn.functional.mse_loss(reg_pred_valid, reg_label_valid)
+        else:
+            # 无有效回归样本时，回归损失为0（不影响总损失）
+            reg_loss = torch.tensor(0.0, device=device)
+
+        # --------------------------
+        # 总损失：分类损失 + λ×回归损失
+        # --------------------------
+        loss = cls_loss + lambda_reg * reg_loss
+        
+        # 反向传播
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        total_loss.append(loss.item())
+        
+        if warmup:
+            warmup_sher.step()
+    
+    return np.mean(total_loss)
+
+
+def eval_joint(
+    loader, model, device, total_heads=None, local_heads=0, return_raw=False, has_reag=False
+):
+    model.eval()
+    # 分类任务：所有样本均参与（含无回归标签的样本）
+    cls_true, cls_pred = [], []
+    # 回归任务：仅保留非NaN标签的样本
+    reg_true, reg_pred = [], []
+    
+    for batch_data in tqdm(loader):
+        # 解析批次数据
+        if has_reag:
+            reac, prod, reag, cls_label, reg_label = batch_data
+            reag = reag.to(device)
+        else:
+            reac, prod, cls_label, reg_label = batch_data
+            reag = None
+        
+        reac, prod = reac.to(device), prod.to(device)
+        
+        # 生成掩码
+        if local_heads > 0:
+            cross_mask = generate_local_global_mask(
+                reac, prod, 1, total_heads, local_heads
+            )
+        else:
+            cross_mask = None
+        
+        # 前向传播（获取双任务输出）
+        with torch.no_grad():
+            cls_out, reg_out = model(reac, prod, reag, cross_mask=cross_mask)
+        
+        # --------------------------
+        # 分类结果处理（所有样本）
+        # --------------------------
+        cls_pred_batch = cls_out.argmax(dim=1).cpu().numpy()  # 取概率最大的类别
+        cls_true_batch = cls_label.numpy()
+        cls_true.append(cls_true_batch)
+        cls_pred.append(cls_pred_batch)
+        
+        # --------------------------
+        # 回归结果处理（仅非NaN样本）
+        # --------------------------
+        reg_pred_batch = torch.clamp(reg_out, 0).squeeze().cpu().numpy()  # 能垒非负，截断 < 0 的值为 0
+        # reg_pred_batch = reg_out.squeeze().cpu().numpy()  # 不进行截断
+        reg_label_batch = reg_label.numpy()  # 真实标签（可能含NaN）
+        
+        # 筛选有效样本（非NaN）
+        reg_valid_mask = np.isfinite(reg_label_batch)
+        if np.any(reg_valid_mask):
+            reg_true.append(reg_label_batch[reg_valid_mask])
+            reg_pred.append(reg_pred_batch[reg_valid_mask])
+    
+    # --------------------------
+    # 计算分类指标（所有样本）
+    # --------------------------
+    cls_true = np.concatenate(cls_true, axis=0)
+    cls_pred = np.concatenate(cls_pred, axis=0)
+    cls_acc = float(np.mean(cls_true == cls_pred))
+    
+    # --------------------------
+    # 计算回归指标（仅有效样本）
+    # --------------------------
+    if len(reg_true) == 0:
+        # 无有效回归样本时，指标设为NaN
+        reg_mae = reg_mse = reg_r2 = float('nan')
+    else:
+        reg_true = np.concatenate(reg_true, axis=0)
+        reg_pred = np.concatenate(reg_pred, axis=0)
+        reg_mae = float(mean_absolute_error(reg_true, reg_pred))
+        reg_mse = float(mean_squared_error(reg_true, reg_pred))
+        reg_r2 = float(r2_score(reg_true, reg_pred))
+    
+    # 整理结果
+    result = {
+        'classification': {'ACC': cls_acc},
+        'regression': {'MAE': reg_mae, 'MSE': reg_mse, 'R2': reg_r2}
+    }
+    
+    if return_raw:
+        result['raw'] = {
+            'cls_true': cls_true.tolist(), 
+            'cls_pred': cls_pred.tolist(),
+            'reg_true': reg_true.tolist() if len(reg_true) > 0 else [],
+            'reg_pred': reg_pred.tolist() if len(reg_pred) > 0 else []
+        }
+    return result

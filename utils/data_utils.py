@@ -1,4 +1,4 @@
-import pandas
+import pandas as pd
 import random
 import numpy as np
 import torch
@@ -7,7 +7,7 @@ import json
 from tqdm import tqdm
 
 from .Dataset import (
-    CNYieldDataset, SelDataset, ReactionPredDataset,
+    CNYieldDataset, SelDataset, ReactionPredDataset, JointDataset, 
     ReactionSeqInferenceDataset
 )
 
@@ -22,7 +22,7 @@ def load_sel(data_path, condition_type='pretrain', has_reag=True):
 
 
 def load_sel_one(data_path, part, condition_type='pretrain', has_reag=True):
-    train_x = pandas.read_csv(os.path.join(data_path, f'{part}.csv'))
+    train_x = pd.read_csv(os.path.join(data_path, f'{part}.csv'))
     rxn, out, catalyst = [[] for _ in range(3)]
     for i, x in train_x.iterrows():
         rxn.append(x['mapped_rxn'])
@@ -44,7 +44,7 @@ def load_cn_yield(data_path, condition_type='pretrain'):
 
 
 def load_cn_yield_one(data_path, part, condition_type='pretrain'):
-    train_x = pandas.read_csv(os.path.join(data_path, f'{part}.csv'))
+    train_x = pd.read_csv(os.path.join(data_path, f'{part}.csv'))
     rxn, out, ligand, base, additive, catalyst = [[] for _ in range(6)]
     for i, x in train_x.iterrows():
         rxn.append(x['mapped_rxn'])
@@ -152,7 +152,7 @@ def check_early_stop(*args):
 
 
 def load_uspto_condition(data_path, mapper_path='', verbose=True, mapper=None):
-    raw_info = pandas.read_csv(data_path)
+    raw_info = pd.read_csv(data_path)
     raw_info = raw_info.fillna('')
     raw_info = raw_info.to_dict('records')
 
@@ -197,7 +197,7 @@ def load_uspto_condition(data_path, mapper_path='', verbose=True, mapper=None):
 
 
 def load_uspto_condition_inference(data_path, mapper):
-    raw_info = pandas.read_csv(data_path)
+    raw_info = pd.read_csv(data_path)
     raw_info = raw_info.fillna('')
     raw_info = raw_info.to_dict('records')
     reac, all_labels = [], []
@@ -215,3 +215,40 @@ def load_uspto_condition_inference(data_path, mapper):
 
     dataset = ReactionSeqInferenceDataset(reac, all_labels, True)
     return dataset
+
+
+def load_joint_data(data_path):
+    """加载训练/验证/测试集的联合数据（分类+回归）"""
+    train_set = load_joint_data_one(data_path, 'train')
+    val_set = load_joint_data_one(data_path, 'val')
+    test_set = load_joint_data_one(data_path, 'test')
+    return train_set, val_set, test_set
+
+
+def load_joint_data_one(data_path, part):
+    """加载单个数据集（train/val/test），适配JointDataset"""
+    # 读取CSV文件（如train.csv、val.csv、test.csv）
+    csv_path = os.path.join(data_path, f'{part}.csv')
+    data = pd.read_csv(csv_path)
+    
+    # 从CSV中提取所需列（与JointDataset参数对应）
+    reactions = []  # 反应数据（对应Reaction列）
+    is_elementary = []  # 分类标签（对应Is_elementary列）
+    barrier = []  # 回归标签（对应Barrier列，可能含NaN）
+    
+    for _, row in data.iterrows():
+        # 提取反应数据（Reaction列）
+        reactions.append(row['Reaction'])
+        # 提取分类标签（Is_elementary列，转换为整数）
+        is_elementary.append(int(row['Is_elementary']))
+        # 提取回归标签（Barrier列，保留浮点数，允许NaN）
+        barrier_val = row['Barrier']
+        # 处理可能的空值（转换为NaN，确保后续损失函数能识别）
+        barrier.append(float(barrier_val) if pd.notna(barrier_val) else float('nan'))
+    
+    # 初始化JointDataset（参数与类定义一致：reactions, is_elementary, barrier）
+    return JointDataset(
+        reactions=reactions,
+        is_elementary=is_elementary,
+        barrier=barrier
+    )
