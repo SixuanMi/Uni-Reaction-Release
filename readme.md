@@ -1,4 +1,4 @@
-# Uni-Reaction
+# Uni-Reaction-Release
 
 Official Implementation of paper:
 
