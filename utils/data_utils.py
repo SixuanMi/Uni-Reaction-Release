@@ -224,7 +224,6 @@ def load_joint_data(data_path):
     test_set = load_joint_data_one(data_path, 'test')
     return train_set, val_set, test_set
 
-
 def load_joint_data_one(data_path, part):
     """加载单个数据集（train/val/test），适配JointDataset"""
     # 读取CSV文件（如train.csv、val.csv、test.csv）
@@ -252,3 +251,69 @@ def load_joint_data_one(data_path, part):
         is_elementary=is_elementary,
         barrier=barrier
     )
+    
+# def load_joint_data_one(data_path, part):
+#     """加载单个数据集（train/val/test），并对回归标签（Barrier）进行标准化处理"""
+#     # 读取CSV文件
+#     csv_path = os.path.join(data_path, f'{part}.csv')
+#     data = pd.read_csv(csv_path)
+    
+#     # 提取基础数据
+#     reactions = []  # 反应数据（Reaction列）
+#     is_elementary = []  # 分类标签（Is_elementary列）
+#     raw_barrier = []  # 原始回归标签（用于标准化）
+    
+#     for _, row in data.iterrows():
+#         # 提取反应SMILES
+#         reactions.append(row['Reaction'])
+#         # 提取分类标签（转为整数）
+#         is_elementary.append(int(row['Is_elementary']))
+#         # 提取原始Barrier值（保留NaN）
+#         barrier_val = row['Barrier']
+#         raw_barrier.append(float(barrier_val) if pd.notna(barrier_val) else float('nan'))
+    
+#     # --------------------------
+#     # 回归标签标准化（Z-score）
+#     # --------------------------
+#     # 定义标准化参数保存路径
+#     mean_path = os.path.join(data_path, 'barrier_mean.npy')
+#     std_path = os.path.join(data_path, 'barrier_std.npy')
+    
+#     if part == 'train':
+#         # 训练集：计算均值和标准差（仅用非NaN值）
+#         valid_barriers = [x for x in raw_barrier if not np.isnan(x)]
+#         if len(valid_barriers) == 0:
+#             raise ValueError("训练集中没有有效的Barrier值（全为NaN），无法进行标准化")
+        
+#         barrier_mean = np.mean(valid_barriers)
+#         barrier_std = np.std(valid_barriers)
+        
+#         # 保存标准化参数（供验证集/测试集使用）
+#         np.save(mean_path, barrier_mean)
+#         np.save(std_path, barrier_std)
+#         print(f"[标准化参数] 训练集Barrier均值: {barrier_mean:.4f}, 标准差: {barrier_std:.4f}")
+    
+#     else:
+#         # 验证集/测试集：使用训练集的标准化参数
+#         if not (os.path.exists(mean_path) and os.path.exists(std_path)):
+#             raise FileNotFoundError(f"未找到标准化参数文件，请先运行训练集加载（需在{data_path}生成barrier_mean.npy和barrier_std.npy）")
+        
+#         barrier_mean = np.load(mean_path)
+#         barrier_std = np.load(std_path)
+    
+#     # 对原始Barrier进行标准化（NaN值保持不变）
+#     barrier = []
+#     for val in raw_barrier:
+#         if np.isnan(val):
+#             barrier.append(float('nan'))  # 保留NaN（无标签）
+#         else:
+#             # Z-score标准化：(x - mean) / std
+#             normalized = (val - barrier_mean) / barrier_std
+#             barrier.append(normalized)
+    
+#     # 返回标准化后的数据集
+#     return JointDataset(
+#         reactions=reactions,
+#         is_elementary=is_elementary,
+#         barrier=barrier
+#     )

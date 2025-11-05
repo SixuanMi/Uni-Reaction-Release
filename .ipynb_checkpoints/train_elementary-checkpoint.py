@@ -30,23 +30,22 @@ def make_dir(args):
     log_dir = os.path.join(detail_dir, 'log.json')
     best_cls_dir = os.path.join(detail_dir, 'best_cls.pth')  # 最佳分类模型
     best_reg_dir = os.path.join(detail_dir, 'best_reg.pth')  # 最佳回归模型
-    best_loss_dir = os.path.join(detail_dir, 'best_loss.pth')  # 最佳loss模型
-    return log_dir, best_cls_dir, best_reg_dir, best_loss_dir
+    return log_dir, best_cls_dir, best_reg_dir
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('联合训练分类和回归任务')
     # 核心参数
     parser.add_argument('--data_path', required=True, type=str, help='数据路径（包含train.csv/val.csv/test.csv）')
-    parser.add_argument('--dim', type=int, default=128, help='模型维度')
+    parser.add_argument('--dim', type=int, default=64, help='模型维度')
     parser.add_argument('--heads', type=int, default=8, help='注意力头数')
     parser.add_argument('--n_layer', type=int, default=3, help='编码器层数')
     parser.add_argument('--dropout', type=float, default=0.2, help='dropout概率')
     parser.add_argument('--warmup', type=int, default=20, help='热身轮数')
-    parser.add_argument('--lrfactor', type=float, default=0.7, help='学习率衰减系数')
+    parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数')
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
     parser.add_argument('--lr', type=float, default=1e-3, help='初始学习率')
-    parser.add_argument('--epoch', type=int, default=100, help='训练总轮数')
+    parser.add_argument('--epoch', type=int, default=200, help='训练总轮数')
     parser.add_argument('--base_log', type=str, default='log_joint', help='日志保存根目录')
     parser.add_argument('--num_worker', type=int, default=8, help='数据加载线程数')
     parser.add_argument('--bs', type=int, default=32, help='批次大小')
@@ -88,7 +87,7 @@ if __name__ == '__main__':
     train_set, val_set, test_set = load_joint_data(args.data_path)
 
     # 创建日志目录
-    log_dir, best_cls_dir, best_reg_dir, best_loss_dir = make_dir(args)
+    log_dir, best_cls_dir, best_reg_dir = make_dir(args)
 
     # 数据加载器（使用双标签collate函数）
     train_loader = DataLoader(
@@ -168,7 +167,7 @@ if __name__ == '__main__':
         mode='min',             # 匹配loss：越小越好
         factor=args.lrfactor,   # 衰减系数（每次衰减为原来百分比%）
         patience=args.lrpatience,  # 验证集指标10轮没提升则衰减
-        min_lr=1e-5,            # 最小学习率（避免衰减到0）
+        min_lr=1e-6,            # 最小学习率（避免衰减到0）
     )
 
 
@@ -189,9 +188,8 @@ if __name__ == '__main__':
         json.dump(log_info, Fout)
 
     # 跟踪最佳模型
-    # best_cls_f1, best_cls_ep = -1.0, 0
-    # best_reg_r2, best_reg_ep = -float('inf'), 0
-    best_total_loss, best_loss_ep = float('inf'), 0
+    best_cls_f1, best_cls_ep = -1.0, 0
+    best_reg_r2, best_reg_ep = -float('inf'), 0
 
     # 训练循环
     for ep in range(args.epoch):
@@ -249,7 +247,6 @@ if __name__ == '__main__':
         #     f'精确率: {val_metric["classification"]["Precision"]:.4f}, '
         #     f'召回率: {val_metric["classification"]["Recall"]:.4f}, '
         #     f'F1: {val_metric["classification"]["F1"]:.4f}, ')
-        print(f'[验证总损失]: {val_metric["validation_loss"]["total_loss"]:.4f}')
         print(f'[验证集] ACC: {val_metric["classification"]["ACC"]:.4f}, F1: {val_metric["classification"]["F1"]:.4f}')
         print(f'[验证集] 分类混淆矩阵：\n{np.array(val_metric["classification"]["Confusion_Matrix"])}')
         print(f'[验证集] 回归 MAE: {val_metric["regression"]["MAE"]:.4f}, MSE: {val_metric["regression"]["MSE"]:.4f}, R2: {val_metric["regression"]["R2"]:.4f}')
@@ -291,40 +288,31 @@ if __name__ == '__main__':
                 print(f'[学习率衰减] {prev_lr:.6f} → {new_lr:.6f}')
             elif new_lr == 1e-6:
                 print(f'[当前学习率] 已达最小学习率 {new_lr:.6f}，停止衰减')
-            # else:
-            #     print(f'[当前学习率] {new_lr:.6f}')
+            else:
+                print(f'[当前学习率] {new_lr:.6f}')
 
         # 保存最佳模型
-        # if val_metric["classification"]["F1"] > best_cls_f1:
-        #     best_cls_f1 = val_metric["classification"]["F1"]
-        #     best_cls_ep = ep + 1
-        #     torch.save(model.state_dict(), best_cls_dir)
-        #     print(f'[最佳分类模型更新] 轮次: {best_cls_ep}, F1: {best_cls_f1:.4f}')
+        if val_metric["classification"]["F1"] > best_cls_f1:
+            best_cls_f1 = val_metric["classification"]["F1"]
+            best_cls_ep = ep + 1
+            torch.save(model.state_dict(), best_cls_dir)
+            print(f'[最佳分类模型更新] 轮次: {best_cls_ep}, F1: {best_cls_f1:.4f}')
         
-        # if val_metric["regression"]["R2"] > best_reg_r2:
-        #     best_reg_r2 = val_metric["regression"]["R2"]
-        #     best_reg_ep = ep + 1
-        #     torch.save(model.state_dict(), best_reg_dir)
-        #     print(f'[最佳回归模型更新] 轮次: {best_reg_ep}, '
-        #         f'R2: {best_reg_r2:.4f}, '
-        #         f'MAE: {val_metric["regression"]["MAE"]:.4f}, '
-        #         f'MSE: {val_metric["regression"]["MSE"]:.4f}')
-        if val_metric["validation_loss"]["total_loss"] < best_total_loss:
-            best_total_loss = val_metric["validation_loss"]["total_loss"]
-            best_loss_ep = ep + 1
-            torch.save(model.state_dict(), best_loss_dir)
-            print(f'[最佳模型更新] 轮次: {best_loss_ep}, 总损失: {best_total_loss:.4f}')
-        
+        if val_metric["regression"]["R2"] > best_reg_r2:
+            best_reg_r2 = val_metric["regression"]["R2"]
+            best_reg_ep = ep + 1
+            torch.save(model.state_dict(), best_reg_dir)
+            print(f'[最佳回归模型更新] 轮次: {best_reg_ep}, '
+                f'R2: {best_reg_r2:.4f}, '
+                f'MAE: {val_metric["regression"]["MAE"]:.4f}, '
+                f'MSE: {val_metric["regression"]["MSE"]:.4f}')
 
     # 输出最终结果
     print('\n[训练完成]')
-    # print(f'最佳分类模型：轮次 {best_cls_ep}, 验证F1 {best_cls_f1:.4f}')
-    # print(f'最佳回归模型：轮次 {best_reg_ep}, 验证R2 {best_reg_r2:.4f}, '
-    print(f'最佳模型：轮次 {best_loss_ep}, 总损失: {best_total_loss:.4f}, '
-        f'验证F1 {log_info["valid_metric"][best_loss_ep - 1]["classification"]["F1"]:.4f}, '
-        f'验证R2 {log_info["valid_metric"][best_loss_ep - 1]["regression"]["R2"]:.4f}, '
-        f'验证MAE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MAE"]:.4f}, '
-        f'验证MSE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MSE"]:.4f}')
+    print(f'最佳分类模型：轮次 {best_cls_ep}, 验证F1 {best_cls_f1:.4f}')
+    print(f'最佳回归模型：轮次 {best_reg_ep}, 验证R2 {best_reg_r2:.4f}, '
+        f'验证MAE {val_metric["regression"]["MAE"]:.4f}, '
+        f'验证MSE {val_metric["regression"]["MSE"]:.4f}')
     
     # # H200 训练结束后不会正常退出，尝试强制终止
     # import threading

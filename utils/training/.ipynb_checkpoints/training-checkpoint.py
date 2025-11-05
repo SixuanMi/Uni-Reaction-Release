@@ -361,7 +361,7 @@ def train_mol_yield_freeze(
 
 
 def train_joint(
-    loader, model, optimizer, device, lambda_reg=0.005,  # lambda为回归损失权重
+    loader, model, optimizer, device, lambda_reg=0.5,  # lambda为回归损失权重
     total_heads=None, local_heads=0, warmup=False, has_reag=True   # 适配无条件场景
 ):
     model.train()
@@ -415,7 +415,7 @@ def train_joint(
             # 只对有效样本计算MSE
             reg_pred_valid = reg_out.squeeze()[reg_valid_mask]
             reg_label_valid = reg_label[reg_valid_mask]
-            reg_loss = mse_loss(reg_pred_valid, reg_label_valid)
+            reg_loss = torch.nn.functional.mse_loss(reg_pred_valid, reg_label_valid)
         else:
             # 无有效回归样本时，回归损失为0（不影响总损失）
             reg_loss = torch.tensor(0.0, device=device)
@@ -447,18 +447,13 @@ def train_joint(
 def eval_joint(
     loader, model, device, total_heads=None, local_heads=0, return_raw=False, has_reag=False,
     num_classes=2,  # 新增：分类任务类别数（默认二分类，多分类需手动指定）
-    pos_label=1,    # 新增：正类标签（默认1，即“实际为真”的标签值）
-    lambda_reg=0.005  # lambda为回归损失权重
+    pos_label=1     # 新增：正类标签（默认1，即“实际为真”的标签值）
 ):
     model.eval()
-    # 分类任务：新增 cls_scores 收集正类置信度得分
-    cls_true, cls_pred, cls_scores = [], [], []  # 新增 cls_scores
+    # 分类任务：收集所有样本的真实标签和预测标签（原有逻辑保留，新增指标计算）
+    cls_true, cls_pred = [], []
     # 回归任务：原有逻辑完全不变
     reg_true, reg_pred = [], []
-    # 新增：验证集损失统计（完全复用训练时的损失逻辑）
-    val_total_loss = []  # 总损失（分类 + λ×回归）
-    val_cls_loss = []    # 分类损失（FocalLoss）
-    val_reg_loss = []    # 回归损失（有效样本MSE，未乘λ）
     
     for batch_data in tqdm(loader):
         # 解析批次数据（原有逻辑不变）
@@ -470,9 +465,7 @@ def eval_joint(
             reag = None
         
         reac, prod = reac.to(device), prod.to(device)
-        cls_label = cls_label.to(device)
-        reg_label = reg_label.to(device)
-            
+        
         # 生成掩码（原有逻辑不变）
         if local_heads > 0:
             cross_mask = generate_local_global_mask(
@@ -484,65 +477,32 @@ def eval_joint(
         # 前向传播（原有逻辑不变）
         with torch.no_grad():
             cls_out, reg_out = model(reac, prod, reag, cross_mask=cross_mask)
-
-            # --------------------------
-            # 损失计算（与train_joint完全一致）
-            # --------------------------
-            # 分类损失
-            cls_loss = FocalLoss(gamma=2.0)(cls_out, cls_label)
-            # 回归损失
-            reg_valid_mask = torch.isfinite(reg_label)
-            num_valid_reg = reg_valid_mask.sum().item()
-            if num_valid_reg > 0:
-                reg_pred_valid = reg_out.squeeze()[reg_valid_mask]
-                reg_label_valid = reg_label[reg_valid_mask]
-                reg_loss = mse_loss(reg_pred_valid, reg_label_valid)
-            else:
-                reg_loss = torch.tensor(0.0, device=device)
-            # 总损失
-            total_loss = cls_loss + lambda_reg * reg_loss
-            
-            # 记录当前批次损失（与train逻辑一致）
-            val_total_loss.append(total_loss.item())
-            val_cls_loss.append(cls_loss.item())
-            val_reg_loss.append(reg_loss.item())
         
-            # --------------------------
-            # 标签/得分收集（原有逻辑保留）
-            # --------------------------
-            # 分类结果：预测标签 + 正类得分
-            cls_pred_batch = cls_out.argmax(dim=1).cpu().numpy()
-            cls_scores_batch = softmax(cls_out, dim=1)[:, pos_label].cpu().numpy()
-            cls_true_batch = cls_label.cpu().numpy()
-            
-            # 回归结果：保留NaN
-            reg_pred_batch = torch.clamp(reg_out, 0).squeeze().cpu().numpy()
-            reg_label_batch = reg_label.cpu().numpy()
-            reg_nan_mask = ~np.isfinite(reg_label_batch)
-            reg_pred_batch[reg_nan_mask] = np.nan
-            
-            # 累加数据
-            cls_true.append(cls_true_batch)
-            cls_pred.append(cls_pred_batch)
-            cls_scores.append(cls_scores_batch)
-            reg_true.append(reg_label_batch)
-            reg_pred.append(reg_pred_batch)
-
-    # --------------------------
-    # 计算平均损失（与train完全一致：直接求列表均值）
-    # --------------------------
-    val_total_loss_avg = np.mean(val_total_loss) if val_total_loss else 0.0
-    val_cls_loss_avg = np.mean(val_cls_loss) if val_cls_loss else 0.0
-    val_reg_loss_avg = np.mean(val_reg_loss) if val_reg_loss else 0.0
+        # --------------------------
+        # 分类结果处理（原有逻辑保留，新增标签收集）
+        # --------------------------
+        cls_pred_batch = cls_out.argmax(dim=1).cpu().numpy()  # 预测类别（0/1/...）
+        cls_true_batch = cls_label.numpy()  # 真实类别
+        cls_true.append(cls_true_batch)
+        cls_pred.append(cls_pred_batch)
+        
+        # --------------------------
+        # 回归结果处理（原有逻辑完全不变）
+        # --------------------------
+        reg_pred_batch = torch.clamp(reg_out, 0).squeeze().cpu().numpy()
+        reg_label_batch = reg_label.numpy()
+        reg_nan_mask = ~np.isfinite(reg_label_batch)
+        reg_pred_batch[reg_nan_mask] = np.nan
+        reg_true.append(reg_label_batch)
+        reg_pred.append(reg_pred_batch)
     
     # --------------------------
     # 拼接所有批次结果（原有逻辑不变）
     # --------------------------
-    cls_true = np.concatenate(cls_true, axis=0) if cls_true else np.array([])
-    cls_pred = np.concatenate(cls_pred, axis=0) if cls_pred else np.array([])
-    cls_scores = np.concatenate(cls_scores, axis=0) if cls_scores else np.array([])
-    reg_true = np.concatenate(reg_true, axis=0) if reg_true else np.array([])
-    reg_pred = np.concatenate(reg_pred, axis=0) if reg_pred else np.array([])
+    cls_true = np.concatenate(cls_true, axis=0)
+    cls_pred = np.concatenate(cls_pred, axis=0)
+    reg_true = np.concatenate(reg_true, axis=0)
+    reg_pred = np.concatenate(reg_pred, axis=0)
     
     # --------------------------
     # 新增：分类任务高级指标计算（核心部分）
@@ -600,14 +560,7 @@ def eval_joint(
             'F1': cls_f1,                # F1分数
             'Confusion_Matrix': cls_cm.tolist()  # 混淆矩阵（转为列表方便日志存储）
         },
-        'regression': {'MAE': reg_mae, 'MSE': reg_mse, 'R2': reg_r2},
-        # 新增：验证集损失（与训练损失逻辑一致）
-        'validation_loss': {
-            'total_loss': val_total_loss_avg,
-            'cls_loss': val_cls_loss_avg,
-            'reg_loss': val_reg_loss_avg,
-            'lambda_reg': lambda_reg  # 记录当前λ，便于日志分析
-        }
+        'regression': {'MAE': reg_mae, 'MSE': reg_mse, 'R2': reg_r2}
     }
     
     if return_raw:
@@ -615,7 +568,6 @@ def eval_joint(
         result['raw'] = {
             'cls_true': cls_true.tolist(), 
             'cls_pred': cls_pred.tolist(),
-            'cls_scores': cls_scores.tolist(),  # 新增：正类置信度得分
             'reg_true': reg_true.tolist(),
             'reg_pred': reg_pred.tolist()
         }
