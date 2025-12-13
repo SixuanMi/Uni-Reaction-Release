@@ -19,7 +19,7 @@ class RAlignDatasetBase(torch.utils.data.Dataset):
 
     def get_aligned_graphs(self, index):
         reac, prod = self.reactions[index].strip().split('>>')
-        reac_rcs, prod_rcs = get_reaction_core(reac, prod)
+        reac_rcs, prod_rcs = get_reaction_core(reac, prod, hop=1)
 
         reac_mol, reac_amap = smiles2graph(reac, with_amap=True)
         prod_mol, prod_amap = smiles2graph(prod, with_amap=True)

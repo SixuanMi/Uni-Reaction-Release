@@ -1,7 +1,7 @@
 import rdkit
 from rdkit import Chem
 import numpy as np
-from typing import Dict
+from typing import Dict, Iterable, Set
 
 from rdkit.Chem.rdmolfiles import SmilesParserParams
 
@@ -47,7 +47,31 @@ def get_bond_info(mol: Chem.Mol) -> Dict:
     return bond_info
 
 
-def get_reaction_core(reac: str, prod: str):
+def _expand_neighbors(
+    amap_idx: Dict[int, int], mol: Chem.Mol, seeds: Iterable[int], hop: int
+) -> Set[int]:
+    """
+    BFS-expand `seeds` by `hop` layers of neighbors (skipping amap==0).
+    """
+    hop = max(hop, 0)
+    visited = set(seeds)
+    frontier = set(seeds)
+    for _ in range(hop):
+        next_frontier = set()
+        for amap in frontier:
+            atom = mol.GetAtomWithIdx(amap_idx[amap])
+            for n_am in atom.GetNeighbors():
+                n_num = n_am.GetAtomMapNum()
+                if n_num != 0 and n_num not in visited:
+                    next_frontier.add(n_num)
+        visited |= next_frontier
+        frontier = next_frontier
+        if not frontier:
+            break
+    return visited
+
+
+def get_reaction_core(reac: str, prod: str, hop: int = 1):
     reac_mol, prod_mol = get_mol(reac), get_mol(prod)
     if reac_mol is None or prod_mol is None:
         raise NotImplementedError('[PREPROCESS] Invalid Smiles Given')
@@ -88,19 +112,10 @@ def get_reaction_core(reac: str, prod: str):
         if atom.GetFormalCharge() != reac_atom.GetFormalCharge():
             RCs.add(amap_num)
 
-    reac_rc, prod_rc = [], []
-    for x in RCs:
-        reac_atom = reac_mol.GetAtomWithIdx(reac_amap_idx[x])
-        for n_am in reac_atom.GetNeighbors():
-            if n_am.GetAtomMapNum() != 0:
-                reac_rc.append(n_am.GetAtomMapNum())
-
-        prod_atom = prod_mol.GetAtomWithIdx(prod_amap_idx[x])
-        for n_am in prod_atom.GetNeighbors():
-            if n_am.GetAtomMapNum() != 0:
-                prod_rc.append(n_am.GetAtomMapNum())
-
-    return (RCs | set(reac_rc)), (RCs | set(prod_rc))
+    # expand reaction core by `hop` neighbor layers (hop=1 matches previous behavior)
+    reac_rc = _expand_neighbors(reac_amap_idx, reac_mol, RCs, hop)
+    prod_rc = _expand_neighbors(prod_amap_idx, prod_mol, RCs, hop)
+    return reac_rc, prod_rc
 
 
 
