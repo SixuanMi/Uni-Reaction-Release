@@ -27,7 +27,7 @@ if __name__ == '__main__':
     parser.add_argument('--heads', type=int, default=8, help='注意力头数（需与训练一致）')
     parser.add_argument('--n_layer', type=int, default=3, help='编码器层数（需与训练一致）')
     parser.add_argument('--num_worker', type=int, default=8, help='数据加载线程数')
-    parser.add_argument('--bs', type=int, default=32, help='批次大小')
+    parser.add_argument('--bs', type=int, default=128, help='批次大小')
     parser.add_argument('--negative_slope', type=float, default=0.2, help='LeakyReLU斜率（需与训练一致）')
     parser.add_argument('--device', type=int, default=0, help='GPU设备ID（-1为CPU）')
     parser.add_argument('--seed', type=int, default=2025, help='随机种子')

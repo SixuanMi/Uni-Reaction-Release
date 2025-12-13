@@ -49,7 +49,7 @@ if __name__ == '__main__':
     parser.add_argument('--epoch', type=int, default=100, help='训练总轮数')
     parser.add_argument('--base_log', type=str, default='log_joint', help='日志保存根目录')
     parser.add_argument('--num_worker', type=int, default=8, help='数据加载线程数')
-    parser.add_argument('--bs', type=int, default=32, help='批次大小')
+    parser.add_argument('--bs', type=int, default=128, help='批次大小')
     parser.add_argument('--negative_slope', type=float, default=0.2, help='LeakyReLU斜率')
     parser.add_argument('--device', type=int, default=0, help='GPU设备ID（-1为CPU）')
     parser.add_argument('--step_start', type=int, default=20, help='学习率衰减起始轮数')
