@@ -83,7 +83,7 @@ def get_reaction_core(reac: str, prod: str):
     for atom in prod_mol.GetAtoms():
         amap_num = atom.GetAtomMapNum()
         reac_atom = reac_mol.GetAtomWithIdx(reac_amap_idx[amap_num])
-        if atom.GetTotalNumHs() != reac_atom.GetTotalNumHs():
+        if atom.GetTotalNumHs(includeNeighbors=True) != reac_atom.GetTotalNumHs(includeNeighbors=True):
             RCs.add(amap_num)
         if atom.GetFormalCharge() != reac_atom.GetFormalCharge():
             RCs.add(amap_num)
