@@ -1,6 +1,9 @@
-from ogb.utils.features import (
-    allowable_features, atom_to_feature_vector, bond_feature_vector_to_dict,
-    bond_to_feature_vector, atom_feature_vector_to_dict
+# from ogb.utils.features import (
+#     allowable_features, atom_to_feature_vector, bond_feature_vector_to_dict,
+#     bond_to_feature_vector, atom_feature_vector_to_dict
+# )
+from .ogb_utils_features import (
+    allowable_features, atom_to_feature_vector, bond_to_feature_vector
 )
 import numpy as np
 import rdkit
