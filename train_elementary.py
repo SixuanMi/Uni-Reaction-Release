@@ -43,10 +43,10 @@ if __name__ == '__main__':
     parser.add_argument('--n_layer', type=int, default=3, help='编码器层数')
     parser.add_argument('--dropout', type=float, default=0.2, help='dropout概率')
     parser.add_argument('--warmup', type=int, default=20, help='热身轮数')
-    parser.add_argument('--lrfactor', type=float, default=0.7, help='学习率衰减系数')
+    parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数')
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
     parser.add_argument('--lr', type=float, default=1e-3, help='初始学习率')
-    parser.add_argument('--epoch', type=int, default=100, help='训练总轮数')
+    parser.add_argument('--epoch', type=int, default=100, help='训练总轮数') # 100-200
     parser.add_argument('--base_log', type=str, default='log_joint', help='日志保存根目录')
     parser.add_argument('--num_worker', type=int, default=8, help='数据加载线程数')
     parser.add_argument('--bs', type=int, default=128, help='批次大小')

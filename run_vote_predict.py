@@ -18,18 +18,15 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
 
-def collect_model_paths(model_dir: str, model_list: str = None, model_paths: List[str] = None) -> List[str]:
+def collect_model_paths(model_paths: List[str], model_root: str) -> List[str]:
     if model_paths:
         return model_paths
-    if model_list:
-        with open(model_list) as f:
-            return [ln.strip() for ln in f if ln.strip()]
-    if model_dir:
-        paths = glob.glob(os.path.join(model_dir, "**", "best_loss.pth"), recursive=True)
+    if model_root:
+        paths = glob.glob(os.path.join(model_root, "**", "best_loss.pth"), recursive=True)
         if not paths:
-            paths = glob.glob(os.path.join(model_dir, "**", "best_model.pt"), recursive=True)
+            paths = glob.glob(os.path.join(model_root, "**", "best_model.pt"), recursive=True)
         return sorted(paths)
-    raise ValueError("需要提供 model_dir / model_list / model_paths 之一")
+    raise ValueError("未找到模型路径，请提供 --model_paths 或 --main_dir（默认搜索 logs 子目录）")
 
 
 def build_model(args, dropout: float):
@@ -90,6 +87,8 @@ def majority_vote_cls(cls_preds: np.ndarray) -> np.ndarray:
 
 def mean_reg(all_reg: np.ndarray) -> np.ndarray:
     # all_reg: [n_models, n_samples]
+    if all_reg.size == 0 or all_reg.shape[0] == 0:
+        return np.array([])
     with np.errstate(all='ignore'):
         out = np.nanmean(all_reg, axis=0)
     # 如果某个样本所有模型均为 NaN，显式设为 NaN，避免警告/inf
@@ -100,11 +99,10 @@ def mean_reg(all_reg: np.ndarray) -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser("多模型投票/平均评估")
-    parser.add_argument('--data_path', required=True, help='包含 test.csv 的目录')
-    parser.add_argument('--model_dir', type=str, default=None, help='递归查找 best_loss.pth/best_model.pt 的目录')
-    parser.add_argument('--model_list', type=str, default=None, help='txt，一行一个模型路径')
-    parser.add_argument('--model_paths', nargs='+', default=None, help='直接提供模型路径列表')
-    parser.add_argument('--output', required=True, help='输出结果 json')
+    parser.add_argument('--main_dir', type=str, default=None, help='训练输出的根目录（如 vote_run_xxx，自动找 folds/test 和 logs）')
+    parser.add_argument('--data_path', type=str, default=None, help='自定义测试集目录（含 test.csv），覆盖 main_dir 默认')
+    parser.add_argument('--model_paths', nargs='+', default=None, help='直接提供模型路径列表，覆盖 main_dir 默认搜索')
+    parser.add_argument('--output', type=str, default=None, help='输出结果 json（默认 main_dir/ensemble_result.json）')
     parser.add_argument('--dim', type=int, default=128)
     parser.add_argument('--heads', type=int, default=8)
     parser.add_argument('--n_layer', type=int, default=3)
@@ -127,13 +125,26 @@ def main():
     fix_seed(args.seed)
     device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
 
-    paths = collect_model_paths(args.model_dir, args.model_list, args.model_paths)
+    # 解析默认目录
+    default_data = None
+    default_model_root = None
+    if args.main_dir:
+        default_data = os.path.join(args.main_dir, "folds", "fold_1")
+        default_model_root = os.path.join(args.main_dir, "logs")
+
+    data_path = args.data_path if args.data_path else default_data
+    model_root = default_model_root
+    output_path = args.output if args.output else (os.path.join(args.main_dir, "ensemble_result.json") if args.main_dir else None)
+
+    paths = collect_model_paths(args.model_paths, model_root)
     if len(paths) == 0:
         raise ValueError("未找到任何模型")
     print(f"[INFO] 模型数: {len(paths)}")
 
     # 加载测试集
-    _, _, test_set = load_joint_data(args.data_path)
+    if not data_path:
+        raise ValueError("请提供 --data_path 或 --main_dir")
+    _, _, test_set = load_joint_data(data_path)
     test_loader = DataLoader(
         test_set, batch_size=args.bs, shuffle=False,
         collate_fn=joint_colfn, num_workers=args.num_worker, pin_memory=True
@@ -190,10 +201,13 @@ def main():
         }
     }
 
-    out_dir = os.path.dirname(args.output)
+    if not output_path:
+        raise ValueError("请提供 --output 或 --main_dir 以确定输出路径")
+
+    out_dir = os.path.dirname(output_path)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
-    with open(args.output, 'w') as f:
+    with open(output_path, 'w') as f:
         json.dump(out, f, indent=4)
     # 控制台简要汇总（仿 predict_elementary.py）
     print('\n' + '=' * 50)
@@ -210,6 +224,18 @@ def main():
             cm[t, p] += 1
     for row in cm:
         print(f'    {row}')
+
+    # 计算召回率（Recall），假设正类别为 1
+    # True Positive (TP): cm[1, 1]
+    # False Negative (FN): cm[1, 0]
+    tp = cm[1, 1]
+    fn = cm[1, 0]
+    if (tp + fn) > 0:
+        recall = float(tp / (tp + fn))
+    else:
+        # 如果真值为正例的样本数为 0，召回率记为 NaN
+        recall = float('nan')
+    print(f'  召回率（Recall, 正类 1）: {recall:.4f}')
     # 回归简单平均
     valid_mask = np.isfinite(true_reg)
     if np.any(valid_mask):
@@ -224,7 +250,7 @@ def main():
     print(f'  MAE: {mae:.4f}')
     print(f'  MSE: {mse:.4f}')
     print(f'  R2: {r2:.4f}')
-    print(f'\n结果文件保存路径: {args.output}')
+    print(f'\n结果文件保存路径: {output_path}')
     print('=' * 50)
 
 
