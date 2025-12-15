@@ -1,7 +1,0 @@
-{
-	"type": "gat",
-	"pretrain_ckpt": "",
-	"arch": {"embedding_dim": 128, "num_heads":8, "num_layers": 3},
-	"dim": 128,
-	"data_type": "raw"
-}

@@ -1,8 +1,0 @@
-{
-	"type": "pretrain",
-	"mode": "independent",
-	"pretrain_ckpt": "condition_config/masking.pth",
-	"arch": {"emb_dim": 300, "num_layer": 5},
-	"dim": 300,
-	"data_type": "pretrain"
-}
