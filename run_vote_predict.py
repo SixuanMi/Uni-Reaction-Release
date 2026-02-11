@@ -7,7 +7,7 @@ from typing import List
 import numpy as np
 import torch
 
-from utils.data_utils import load_joint_data, fix_seed
+from utils.data_utils import load_joint_data_one, fix_seed
 from utils.training.training import eval_joint
 from utils.Dataset import joint_colfn
 from model import JointModel, RAlignEncoder, build_cn_condition_encoder_with_eval
@@ -144,7 +144,7 @@ def main():
     # 加载测试集
     if not data_path:
         raise ValueError("请提供 --data_path 或 --main_dir")
-    _, _, test_set = load_joint_data(data_path)
+    test_set = load_joint_data_one(data_path, 'test')
     test_loader = DataLoader(
         test_set, batch_size=args.bs, shuffle=False,
         collate_fn=joint_colfn, num_workers=args.num_worker, pin_memory=True
@@ -152,6 +152,7 @@ def main():
 
     # 逐模型预测
     cls_preds = []
+    cls_scores = []
     reg_preds = []
     true_cls = None
     true_reg = None
@@ -176,28 +177,36 @@ def main():
             lambda_reg=0.005
         )
         cls_preds.append(np.array(res['raw']['cls_pred']))
+        cls_scores.append(np.array(res['raw']['cls_scores']))
         reg_preds.append(np.array(res['raw']['reg_pred']))
         if true_cls is None:
             true_cls = np.array(res['raw']['cls_true'])
             true_reg = np.array(res['raw']['reg_true'])
 
     cls_preds = np.stack(cls_preds, axis=0)
+    cls_scores = np.stack(cls_scores, axis=0)
     reg_preds = np.stack(reg_preds, axis=0)
 
     # 集成
     vote_cls = majority_vote_cls(cls_preds)
     mean_reg_pred = mean_reg(reg_preds)
 
+    mean_prob_per_sample = np.nanmean(cls_scores, axis=0)  # [n_samples]
+    reg_std_per_sample = np.nanstd(reg_preds, axis=0)
+
     # 汇总
     out = {
         'model_paths': paths,
         'classification': {
             'true': true_cls.tolist(),
-            'pred': vote_cls.tolist()
+            'pred': vote_cls.tolist(),
+            'mean_prob': mean_prob_per_sample.tolist()  # 每个样本的平均正类概率
+            # 'prob_mean_all': float(np.nanmean(mean_prob_per_sample))  # 全局平均概率
         },
         'regression': {
             'true': true_reg.tolist(),
-            'pred': mean_reg_pred.tolist()
+            'pred': mean_reg_pred.tolist(),
+            'std_all_models': reg_std_per_sample.tolist()  # 每个样本的预测标准差
         }
     }
 

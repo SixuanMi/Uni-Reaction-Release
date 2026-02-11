@@ -38,15 +38,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser('联合训练分类和回归任务')
     # 核心参数
     parser.add_argument('--data_path', required=True, type=str, help='数据路径（包含train.csv/val.csv/test.csv）')
-    parser.add_argument('--dim', type=int, default=128, help='模型维度')
+    parser.add_argument('--dim', type=int, default=128, help='模型维度') # 128
     parser.add_argument('--heads', type=int, default=8, help='注意力头数')
-    parser.add_argument('--n_layer', type=int, default=3, help='编码器层数')
+    parser.add_argument('--n_layer', type=int, default=3, help='编码器层数') # 3
     parser.add_argument('--dropout', type=float, default=0.2, help='dropout概率')
     parser.add_argument('--warmup', type=int, default=20, help='热身轮数')
-    parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数')
+    parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数') # 0.7
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
-    parser.add_argument('--lr', type=float, default=1e-3, help='初始学习率')
-    parser.add_argument('--epoch', type=int, default=100, help='训练总轮数') # 100-200
+    parser.add_argument('--lr', type=float, default=5e-4, help='初始学习率') # 1e-3
+    parser.add_argument('--epoch', type=int, default=120, help='训练总轮数') # 100-200
     parser.add_argument('--base_log', type=str, default='log_joint', help='日志保存根目录')
     parser.add_argument('--num_worker', type=int, default=8, help='数据加载线程数')
     parser.add_argument('--bs', type=int, default=128, help='批次大小')
@@ -55,7 +55,7 @@ if __name__ == '__main__':
     parser.add_argument('--step_start', type=int, default=20, help='学习率衰减起始轮数')
     parser.add_argument('--seed', type=int, default=2025, help='随机种子（保证可复现）')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数')
-        # 联合训练特有参数# 联合训练特有参数中新增
+    # 联合训练特有参数# 联合训练特有参数中新增
     parser.add_argument('--loss_weight_mode', type=str, default='fixed', choices=['fixed', 'dynamic'], help='损失权重模式（fixed：固定λ；dynamic：动态调整）')
     parser.add_argument('--lambda_init', type=float, default=5e-3, help='初始λ（fixed模式下为固定值，dynamic模式下为初始值）')
     parser.add_argument('--alpha', type=float, default=0.1, help='动态权重调整系数（值越小，调整越平滑）')
@@ -168,7 +168,8 @@ if __name__ == '__main__':
         mode='min',             # 匹配loss：越小越好
         factor=args.lrfactor,   # 衰减系数（每次衰减为原来百分比%）
         patience=args.lrpatience,  # 验证集指标10轮没提升则衰减
-        min_lr=1e-5,            # 最小学习率（避免衰减到0）
+        min_lr=1e-6,
+        # min_lr=1e-5,            # 最小学习率（避免衰减到0）
     )
 
 

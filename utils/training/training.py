@@ -493,8 +493,9 @@ def eval_joint(
             # 回归损失
             reg_valid_mask = torch.isfinite(reg_label)
             num_valid_reg = reg_valid_mask.sum().item()
+            reg_out_flat = reg_out.view(-1)
             if num_valid_reg > 0:
-                reg_pred_valid = reg_out.squeeze()[reg_valid_mask]
+                reg_pred_valid = reg_out_flat[reg_valid_mask]
                 reg_label_valid = reg_label[reg_valid_mask]
                 reg_loss = mse_loss(reg_pred_valid, reg_label_valid)
             else:
@@ -516,7 +517,7 @@ def eval_joint(
             cls_true_batch = cls_label.cpu().numpy()
             
             # 回归结果：保留NaN
-            reg_pred_batch = torch.clamp(reg_out, 0).squeeze().cpu().numpy()
+            reg_pred_batch = torch.clamp(reg_out, 0).view(-1).cpu().numpy()
             reg_label_batch = reg_label.cpu().numpy()
             reg_nan_mask = ~np.isfinite(reg_label_batch)
             reg_pred_batch[reg_nan_mask] = np.nan

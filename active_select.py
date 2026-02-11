@@ -1,6 +1,6 @@
 import argparse
-import math
 import os
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -11,13 +11,41 @@ def entropy(p: np.ndarray) -> float:
     return -(p * np.log(p) + (1 - p) * np.log(1 - p))
 
 
+def sort_pkl_by_uncertainty(pkl_path: str) -> list:
+    with open(pkl_path, "rb") as fin:
+        data = pickle.load(fin)
+    if not isinstance(data, list) or len(data) == 0:
+        raise ValueError("PKL 文件需为包含 reaction_prediction 的列表")
+
+    def metrics(item: dict):
+        preds = item.get('reaction_prediction') or []
+        if len(preds) == 0:
+            raise ValueError("PKL 中存在缺少 reaction_prediction 的样本")
+        latest = preds[-1]
+        if ('uncert_cls_entropy_rounded' not in latest) or ('uncert_reg_std' not in latest):
+            raise ValueError("reaction_prediction 中缺少不确定性指标")
+        return float(latest['uncert_cls_entropy_rounded']), float(latest['uncert_reg_std'])
+
+    return sorted(data, key=metrics, reverse=True)
+
+
 def main():
     parser = argparse.ArgumentParser("主动学习样本选择（分类不确定性优先）")
-    parser.add_argument('--input', required=True, help='vote_infer_unlabeled 生成的 CSV，包含 model*_cls_prob / model*_barrier')
-    parser.add_argument('--top_n', type=int, default=100, help='选择前 N 个不确定样本')
-    parser.add_argument('--output', required=True, help='输出 CSV，附加不确定性指标与排序')
+    parser.add_argument('--input', required=True, help='vote_infer_unlabeled 生成的 CSV（或经过处理的 PKL）')
+    parser.add_argument('--top_n', type=int, default=100, help='选择前 N 个不确定样本（PKL 输入时忽略）')
+    parser.add_argument('--output', required=True, help='输出 CSV（或 PKL，取决于输入类型）')
     args = parser.parse_args()
     print(args)
+
+    if args.input.endswith(".pkl"):
+        sorted_pkl = sort_pkl_by_uncertainty(args.input)
+        out_dir = os.path.dirname(args.output)
+        if out_dir and not os.path.exists(out_dir):
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.output, "wb") as fout:
+            pickle.dump(sorted_pkl, fout)
+        print(f"[INFO] PKL 输入已按不确定性排序（未截断 Top N），保存至 {args.output}")
+        return
 
     df = pd.read_csv(args.input)
     cls_cols = [c for c in df.columns if c.endswith('_cls_prob')]
@@ -31,18 +59,24 @@ def main():
     # 分类不确定性：熵（平均概率）
     mean_cls_prob = np.nanmean(cls_probs, axis=1)
     cls_entropy = entropy(mean_cls_prob)
-    cls_entropy_norm = cls_entropy / math.log(2.0)  # 二分类最大熵 log(2)
+    cls_entropy_rounded = np.round(cls_entropy, 3)
+    # cls_entropy_norm = cls_entropy / np.log(2.0)  # 二分类最大熵 log(2)
 
     # 回归标准差（用于优先排序，避免回归已确定的样本）
     reg_std = np.nanstd(reg_preds, axis=1)
+    reg_std_rounded = np.round(reg_std, 2)
 
     df['uncert_cls_entropy'] = cls_entropy
-    df['uncert_cls_entropy_norm'] = cls_entropy_norm
-    df['uncert_reg_std'] = reg_std
+    df['uncert_cls_entropy_rounded'] = cls_entropy_rounded
+    # df['uncert_cls_entropy_norm'] = cls_entropy_norm
+    df['uncert_reg_std'] = reg_std_rounded
 
     # 先按回归标准差降序排序，再取分类熵 Top N
-    df_sorted = df.sort_values(by='uncert_reg_std', ascending=False).reset_index(drop=True)
-    df_sorted = df_sorted.sort_values(by='uncert_cls_entropy', ascending=False).reset_index(drop=True)
+    # 先取分类熵，再按回归标准差降序排序 Top N
+    df_sorted = df.sort_values(
+        by=['uncert_cls_entropy_rounded', 'uncert_reg_std'],
+        ascending=[False, False]
+    ).reset_index(drop=True)
     top_df = df_sorted.head(args.top_n)
 
     out_dir = os.path.dirname(args.output)

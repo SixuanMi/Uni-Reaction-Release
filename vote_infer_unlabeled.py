@@ -1,8 +1,10 @@
 import argparse
 import glob
 import json
+import pickle
 import os
-from typing import List
+import sys
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -92,9 +94,34 @@ def collect_model_paths(model_paths: List[str], main_dir: str) -> List[str]:
     raise ValueError("未找到模型，请提供 --model_paths 或 --main_dir")
 
 
-def load_reactions(input_path: str) -> List[str]:
-    reactions = []
-    if input_path.endswith(".csv"):
+def binary_entropy(p: float) -> float:
+    """二分类熵，输入为正类概率。"""
+    p = np.clip(p, 1e-12, 1 - 1e-12)
+    return float(-(p * np.log(p) + (1 - p) * np.log(1 - p)))
+
+
+def patch_numpy_for_pickle():
+    """兼容新版本 numpy 序列化产生的 numpy._core.* 路径。"""
+    import numpy as np
+    sys.modules.setdefault('numpy._core', np.core)
+    sys.modules.setdefault('numpy._core.numeric', np.core.numeric)
+
+
+def load_reactions(input_path: str) -> Tuple[List[str], Optional[List[dict]]]:
+    """读取输入文件，返回反应 SMILES 列表和（可选的）PKL 原始数据。"""
+    reactions: List[str] = []
+    raw_pkl: Optional[List[dict]] = None
+    if input_path.endswith(".pkl"):
+        patch_numpy_for_pickle()
+        with open(input_path, "rb") as fin:
+            raw_pkl = pickle.load(fin)
+        if not isinstance(raw_pkl, list):
+            raise ValueError("PKL 文件格式需为包含字典的列表")
+        for idx, item in enumerate(raw_pkl):
+            if not isinstance(item, dict) or 'reaction_smiles_mapped' not in item:
+                raise ValueError(f"PKL 第 {idx} 个元素缺少 reaction_smiles_mapped")
+            reactions.append(str(item['reaction_smiles_mapped']))
+    elif input_path.endswith(".csv"):
         import pandas as pd
         df = pd.read_csv(input_path)
         if 'Reaction' not in df.columns:
@@ -105,15 +132,49 @@ def load_reactions(input_path: str) -> List[str]:
             reactions = [ln.strip() for ln in f if ln.strip()]
     if not reactions:
         raise ValueError("未读取到任何反应 SMILES")
-    return reactions
+    return reactions, raw_pkl
+
+
+def update_pkl_predictions(
+    raw_pkl: List[dict],
+    per_model_cls: np.ndarray,
+    per_model_reg: np.ndarray
+) -> List[dict]:
+    """将预测结果与不确定性附加到 PKL 数据中。"""
+    n_models, n_samples = per_model_cls.shape
+    if len(raw_pkl) != n_samples:
+        raise ValueError(f"PKL 样本数 {len(raw_pkl)} 与预测结果 {n_samples} 不一致")
+
+    for idx, item in enumerate(raw_pkl):
+        # 确保存在 reaction_prediction 列表
+        if 'reaction_prediction' not in item or item['reaction_prediction'] is None:
+            item['reaction_prediction'] = []
+
+        cls_vals = per_model_cls[:, idx]
+        reg_vals = per_model_reg[:, idx]
+
+        mean_cls_prob = float(np.nanmean(cls_vals))
+        cls_entropy = binary_entropy(mean_cls_prob)
+        cls_entropy_rounded = float(np.round(cls_entropy, 3))
+        reg_std = float(np.nanstd(reg_vals))
+        reg_std_rounded = float(np.round(reg_std, 2))
+
+        pred_entry = {
+            "model_cls_prob": [float(x) for x in cls_vals.tolist()],
+            "model_barrier": [float(x) for x in reg_vals.tolist()],
+            "uncert_cls_entropy_rounded": cls_entropy_rounded,
+            "uncert_reg_std": reg_std_rounded
+        }
+        item['reaction_prediction'].append(pred_entry)
+    return raw_pkl
 
 
 def main():
     parser = argparse.ArgumentParser("无标签反应列表的投票预测")
-    parser.add_argument('--input', required=True, help='反应 SMILES 列表（csv含Reaction列或txt逐行）')
+    parser.add_argument('--input', required=True, help='反应 SMILES 列表（csv含Reaction列、txt逐行或包含 reaction_smiles_mapped 的pkl）')
     parser.add_argument('--main_dir', type=str, default=None, help='训练输出根目录（默认 logs 下搜模型）')
     parser.add_argument('--model_paths', nargs='+', default=None, help='直接提供模型路径列表')
-    parser.add_argument('--output', required=True, help='输出 CSV 路径（含各模型预测）')
+    parser.add_argument('--output', required=True, help='输出路径（CSV 或 PKL，取决于输入类型）')
     parser.add_argument('--dim', type=int, default=128)
     parser.add_argument('--heads', type=int, default=8)
     parser.add_argument('--n_layer', type=int, default=3)
@@ -141,7 +202,7 @@ def main():
         raise ValueError("未找到模型文件")
     print(f"[INFO] 模型数: {len(paths)}")
 
-    reactions = load_reactions(args.input)
+    reactions, raw_pkl = load_reactions(args.input)
     dataset = SimpleRxnDataset(reactions)
     loader = DataLoader(
         dataset, batch_size=args.bs, shuffle=False,
@@ -179,19 +240,26 @@ def main():
     per_model_cls = np.stack(per_model_cls, axis=0)
     per_model_reg = np.stack(per_model_reg, axis=0)
 
-    # 汇总到 DataFrame
-    import pandas as pd
-    data = {'Reaction': reactions}
-    for i in range(len(paths)):
-        data[f'model{i+1}_cls_prob'] = per_model_cls[i]
-        data[f'model{i+1}_barrier'] = per_model_reg[i]
-    df_out = pd.DataFrame(data)
-
     out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
-    df_out.to_csv(args.output, index=False)
-    print(f"[INFO] 预测完成，保存至 {args.output}")
+
+    if raw_pkl is not None:
+        # PKL 输入：将预测结果写回 PKL
+        updated_pkl = update_pkl_predictions(raw_pkl, per_model_cls, per_model_reg)
+        with open(args.output, "wb") as fout:
+            pickle.dump(updated_pkl, fout)
+        print(f"[INFO] PKL 预测完成，保存至 {args.output}")
+    else:
+        # 汇总到 DataFrame
+        import pandas as pd
+        data = {'Reaction': reactions}
+        for i in range(len(paths)):
+            data[f'model{i+1}_cls_prob'] = per_model_cls[i]
+            data[f'model{i+1}_barrier'] = per_model_reg[i]
+        df_out = pd.DataFrame(data)
+        df_out.to_csv(args.output, index=False)
+        print(f"[INFO] 预测完成，保存至 {args.output}")
 
 
 if __name__ == '__main__':
