@@ -1,5 +1,5 @@
 import torch
-from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
+from utils.ogb_utils_features import AtomEncoder, BondEncoder
 from ..layers import SelfLoopGATConv, SparseEdgeUpdateLayer
 
 

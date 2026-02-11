@@ -3,6 +3,8 @@ Local copy of the OGB atom/bond featurization utilities so we can tweak them
 without importing the ogb package.
 """
 
+import torch
+
 # allowable multiple choice node and edge features
 allowable_features = {
     'possible_atomic_num_list': list(range(1, 119)) + ['misc'],
@@ -82,9 +84,77 @@ def bond_to_feature_vector(bond):
     return bond_feature
 
 
+def get_atom_feature_dims():
+    return list(map(len, [
+        allowable_features['possible_atomic_num_list'],
+        allowable_features['possible_chirality_list'],
+        allowable_features['possible_degree_list'],
+        allowable_features['possible_formal_charge_list'],
+        allowable_features['possible_numH_list'],
+        allowable_features['possible_number_radical_e_list'],
+        allowable_features['possible_hybridization_list'],
+        allowable_features['possible_is_aromatic_list'],
+        allowable_features['possible_is_in_ring_list'],
+    ]))
+
+
+def get_bond_feature_dims():
+    return list(map(len, [
+        allowable_features['possible_bond_type_list'],
+        allowable_features['possible_bond_stereo_list'],
+        allowable_features['possible_is_conjugated_list'],
+    ]))
+
+
+class AtomEncoder(torch.nn.Module):
+    def __init__(self, emb_dim, optional_full_atom_features_dims=None):
+        super(AtomEncoder, self).__init__()
+        if optional_full_atom_features_dims is not None:
+            full_atom_feature_dims = optional_full_atom_features_dims
+        else:
+            full_atom_feature_dims = get_atom_feature_dims()
+
+        self.atom_embedding_list = torch.nn.ModuleList()
+        for dim in full_atom_feature_dims:
+            emb = torch.nn.Embedding(dim, emb_dim)
+            torch.nn.init.xavier_uniform_(emb.weight.data)
+            self.atom_embedding_list.append(emb)
+
+    def forward(self, x):
+        x_embedding = 0
+        for i in range(x.shape[1]):
+            x_embedding += self.atom_embedding_list[i](x[:, i])
+        return x_embedding
+
+
+class BondEncoder(torch.nn.Module):
+    def __init__(self, emb_dim, optional_full_bond_features_dims=None):
+        super(BondEncoder, self).__init__()
+        if optional_full_bond_features_dims is not None:
+            full_bond_feature_dims = optional_full_bond_features_dims
+        else:
+            full_bond_feature_dims = get_bond_feature_dims()
+
+        self.bond_embedding_list = torch.nn.ModuleList()
+        for dim in full_bond_feature_dims:
+            emb = torch.nn.Embedding(dim, emb_dim)
+            torch.nn.init.xavier_uniform_(emb.weight.data)
+            self.bond_embedding_list.append(emb)
+
+    def forward(self, edge_attr):
+        bond_embedding = 0
+        for i in range(edge_attr.shape[1]):
+            bond_embedding += self.bond_embedding_list[i](edge_attr[:, i])
+        return bond_embedding
+
+
 __all__ = [
     'allowable_features',
     'safe_index',
     'atom_to_feature_vector',
     'bond_to_feature_vector',
+    'get_atom_feature_dims',
+    'get_bond_feature_dims',
+    'AtomEncoder',
+    'BondEncoder',
 ]

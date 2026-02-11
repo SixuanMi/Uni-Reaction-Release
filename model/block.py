@@ -3,7 +3,7 @@ import torch
 from .layers import RAlignGATBlock, DualGATBlock, TransDecLayer
 from .utils import graph2batch
 
-from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
+from utils.ogb_utils_features import AtomEncoder, BondEncoder
 import math
 
 
