@@ -32,6 +32,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=int, default=0, help='GPU设备ID（-1为CPU）')
     parser.add_argument('--seed', type=int, default=2025, help='随机种子')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数（需与训练一致）')
+    parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
     parser.add_argument('--output_path', required=True, type=str, help='输出结果保存路径（.json）')
     parser.add_argument('--checkpoint', required=True, type=str, help='模型权重文件路径（.pth）')
     # 任务相关参数（与训练一致，新增pos_label配置）
@@ -100,7 +101,8 @@ if __name__ == '__main__':
         reac_num_keys={},
         dropout=0.0,  # 预测时禁用dropout
         negative_slope=args.negative_slope,
-        update_last_edge=False
+        update_last_edge=False,
+        use_lg_lin=args.use_lg_lin
     )
 
     # 初始化联合模型（与训练时完全一致）

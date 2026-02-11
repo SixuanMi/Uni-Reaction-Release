@@ -55,6 +55,7 @@ if __name__ == '__main__':
     parser.add_argument('--step_start', type=int, default=20, help='学习率衰减起始轮数')
     parser.add_argument('--seed', type=int, default=2025, help='随机种子（保证可复现）')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数')
+    parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（默认关闭，移除无用参数）')
     # 联合训练特有参数# 联合训练特有参数中新增
     parser.add_argument('--loss_weight_mode', type=str, default='fixed', choices=['fixed', 'dynamic'], help='损失权重模式（fixed：固定λ；dynamic：动态调整）')
     parser.add_argument('--lambda_init', type=float, default=5e-3, help='初始λ（fixed模式下为固定值，dynamic模式下为初始值）')
@@ -143,7 +144,8 @@ if __name__ == '__main__':
         reac_num_keys={},
         dropout=args.dropout,
         negative_slope=args.negative_slope,
-        update_last_edge=False
+        update_last_edge=False,
+        use_lg_lin=args.use_lg_lin
     )
 
     # 初始化联合模型（条件编码器可选传入）

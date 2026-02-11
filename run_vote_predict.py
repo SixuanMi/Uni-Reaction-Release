@@ -63,7 +63,8 @@ def build_model(args, dropout: float):
         reac_num_keys={},
         dropout=dropout,
         negative_slope=args.negative_slope,
-        update_last_edge=False
+        update_last_edge=False,
+        use_lg_lin=args.use_lg_lin
     )
 
     return JointModel(
@@ -113,6 +114,7 @@ def main():
     parser.add_argument('--seed', type=int, default=2025)
     parser.add_argument('--cls_out_dim', type=int, default=2)
     parser.add_argument('--local_heads', type=int, default=4)
+    parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
     parser.add_argument('--use_condition', action='store_true')
     parser.add_argument('--condition_config', type=str, default='')
     parser.add_argument('--condition_both', action='store_true')

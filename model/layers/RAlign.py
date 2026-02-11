@@ -5,7 +5,7 @@ from ..utils import graph2batch
 
 
 class RAlingLayer(torch.nn.Module):
-    def __init__(self, dim, dropout=0):
+    def __init__(self, dim, dropout=0, use_lg_lin=True):
         super(RAlingLayer, self).__init__()
         self.comm_lin = torch.nn.Sequential(
             torch.nn.Linear(dim + dim, dim + dim),
@@ -14,12 +14,17 @@ class RAlingLayer(torch.nn.Module):
             torch.nn.Linear(dim + dim, dim + dim)
         )
 
-        self.lg_lin = torch.nn.Sequential(
-            torch.nn.Linear(dim, dim),
-            torch.nn.GELU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(dim, dim)
-        )
+        self.use_lg_lin = use_lg_lin
+        if self.use_lg_lin:
+            self.lg_lin = torch.nn.Sequential(
+                torch.nn.Linear(dim, dim),
+                torch.nn.GELU(),
+                torch.nn.Dropout(dropout),
+                torch.nn.Linear(dim, dim)
+            )
+        else:
+            # keep reactant-only atoms unchanged and avoid creating unused params
+            self.lg_lin = None
         self.dim = dim
 
     def forward(self, x_prod, x_reac, reac_mask):
@@ -30,7 +35,10 @@ class RAlingLayer(torch.nn.Module):
         new_reac[reac_mask] = shared_result[:, self.dim:]
 
         if torch.any(~reac_mask).item():
-            new_reac[~reac_mask] = self.lg_lin(x_reac[~reac_mask])
+            if self.use_lg_lin:
+                new_reac[~reac_mask] = self.lg_lin(x_reac[~reac_mask])
+            else:
+                new_reac[~reac_mask] = x_reac[~reac_mask]
 
         return new_prod, new_reac
 
@@ -39,7 +47,7 @@ class RAlignGATBlock(torch.nn.Module):
     def __init__(
         self, emb_dim, heads, edge_dim, reac_batch_infos={}, reac_num_keys={},
         prod_batch_infos={}, prod_num_keys={}, dropout=0.1,
-        negative_slope=0.2, edge_update=True
+        negative_slope=0.2, edge_update=True, use_lg_lin=True
     ):
         super(RAlignGATBlock, self).__init__()
         self.reac_batch_adapter = torch.nn.ModuleDict({
@@ -82,7 +90,9 @@ class RAlignGATBlock(torch.nn.Module):
 
         self.edge_update = edge_update
 
-        self.fusion_layer = RAlingLayer(emb_dim, dropout)
+        self.fusion_layer = RAlingLayer(
+            emb_dim, dropout, use_lg_lin=use_lg_lin
+        )
 
         self.reac_mpnn_ln = torch.nn.LayerNorm(emb_dim)
         self.prod_mpnn_ln = torch.nn.LayerNorm(emb_dim)
