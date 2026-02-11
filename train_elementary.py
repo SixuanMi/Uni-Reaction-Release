@@ -34,6 +34,11 @@ def make_dir(args):
     return log_dir, best_cls_dir, best_reg_dir, best_loss_dir
 
 
+def tie_reac_prod_params(encoder):
+    for layer in encoder.layers:
+        layer.prod_mpnn = layer.reac_mpnn
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('联合训练分类和回归任务')
     # 核心参数
@@ -56,6 +61,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=2025, help='随机种子（保证可复现）')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数')
     parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（默认关闭，移除无用参数）')
+    parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（默认关闭）')
     # 联合训练特有参数# 联合训练特有参数中新增
     parser.add_argument('--loss_weight_mode', type=str, default='fixed', choices=['fixed', 'dynamic'], help='损失权重模式（fixed：固定λ；dynamic：动态调整）')
     parser.add_argument('--lambda_init', type=float, default=5e-3, help='初始λ（fixed模式下为固定值，dynamic模式下为初始值）')
@@ -147,6 +153,8 @@ if __name__ == '__main__':
         update_last_edge=False,
         use_lg_lin=args.use_lg_lin
     )
+    if args.share_reac_prod_encoder:
+        tie_reac_prod_params(encoder)
 
     # 初始化联合模型（条件编码器可选传入）
     model = JointModel(

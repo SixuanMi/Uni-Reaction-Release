@@ -18,6 +18,10 @@ from rdkit import RDLogger
 
 RDLogger.DisableLog('rdApp.*')
 
+def tie_reac_prod_params(encoder):
+    for layer in encoder.layers:
+        layer.prod_mpnn = layer.reac_mpnn
+
 
 class SimpleRxnDataset(RAlignDatasetBase):
     """仅包含反应 SMILES 的推理数据集，返回 reac/prod 图和原始 SMILES。"""
@@ -72,6 +76,8 @@ def build_model(args, dropout: float):
         update_last_edge=False,
         use_lg_lin=args.use_lg_lin
     )
+    if args.share_reac_prod_encoder:
+        tie_reac_prod_params(encoder)
 
     return JointModel(
         encoder=encoder,
@@ -187,6 +193,7 @@ def main():
     parser.add_argument('--cls_out_dim', type=int, default=2)
     parser.add_argument('--local_heads', type=int, default=4)
     parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
+    parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（需与训练一致）')
     parser.add_argument('--use_condition', action='store_true')
     parser.add_argument('--condition_config', type=str, default='')
     parser.add_argument('--condition_both', action='store_true')

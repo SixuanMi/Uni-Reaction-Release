@@ -18,6 +18,10 @@ from rdkit import RDLogger
 # 禁用RDKit日志
 RDLogger.DisableLog('rdApp.*')
 
+def tie_reac_prod_params(encoder):
+    for layer in encoder.layers:
+        layer.prod_mpnn = layer.reac_mpnn
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('联合模型预测（适配FocalLoss+完整分类指标）')
@@ -33,6 +37,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=2025, help='随机种子')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数（需与训练一致）')
     parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
+    parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（需与训练一致）')
     parser.add_argument('--output_path', required=True, type=str, help='输出结果保存路径（.json）')
     parser.add_argument('--checkpoint', required=True, type=str, help='模型权重文件路径（.pth）')
     # 任务相关参数（与训练一致，新增pos_label配置）
@@ -104,6 +109,8 @@ if __name__ == '__main__':
         update_last_edge=False,
         use_lg_lin=args.use_lg_lin
     )
+    if args.share_reac_prod_encoder:
+        tie_reac_prod_params(encoder)
 
     # 初始化联合模型（与训练时完全一致）
     model = JointModel(
