@@ -50,6 +50,7 @@ if __name__ == '__main__':
     parser.add_argument('--warmup', type=int, default=20, help='热身轮数')
     parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数') # 0.7
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
+    parser.add_argument('--auc_delta', type=float, default=1e-4, help='AUC最小提升阈值（用于LR调度/最佳模型/早停）')
     parser.add_argument('--min_lr', type=float, default=1e-6, help='学习率最小值（用于LR调度与早停触发）')
     parser.add_argument('--lr', type=float, default=5e-4, help='初始学习率') # 1e-3
     parser.add_argument('--epoch', type=int, default=120, help='训练总轮数') # 100-200
@@ -107,6 +108,8 @@ if __name__ == '__main__':
         raise ValueError("--early_stop_patience 不能为负数")
     if args.min_lr <= 0:
         raise ValueError("--min_lr 必须大于0")
+    if args.auc_delta < 0:
+        raise ValueError("--auc_delta 不能为负数")
         
     # 加载双任务数据
     train_set, val_set, test_set = load_joint_data(args.data_path)
@@ -195,13 +198,15 @@ if __name__ == '__main__':
         mode='max',             # 匹配ROC-AUC：越大越好
         factor=args.lrfactor,   # 衰减系数（每次衰减为原来百分比）
         patience=args.lrpatience,  # 验证集指标连续未提升轮数达到阈值后衰减
+        threshold=args.auc_delta,
+        threshold_mode='abs',
         min_lr=args.min_lr,
         # min_lr=1e-5,            # 最小学习率（避免衰减到0）
     )
     print(
         f'[早停设置] min_lr={args.min_lr:.6f}, '
         f'early_stop_patience={early_stop_patience}, '
-        'metric=val ROC-AUC'
+        f'metric=val ROC-AUC, auc_delta={args.auc_delta:.1e}'
     )
 
 
@@ -210,6 +215,7 @@ if __name__ == '__main__':
         'args': args.__dict__,
         'early_stop_patience': early_stop_patience,
         'early_stop_min_lr': args.min_lr,
+        'auc_delta': args.auc_delta,
         'early_stop_epoch': None,
         'train_total_loss': [],
         'train_cls_loss': [],
@@ -341,9 +347,9 @@ if __name__ == '__main__':
             else:
                 print('[学习率调度] 当前验证ROC-AUC为NaN，跳过本轮调度')
 
-        # 保存最佳模型：以验证集ROC-AUC为准（越大越好）
+        # 保存最佳模型：以验证集ROC-AUC为准（需提升超过auc_delta）
         if np.isfinite(cur_auc):
-            if cur_auc > best_cls_auc:
+            if cur_auc > best_cls_auc + args.auc_delta:
                 best_cls_auc = cur_auc
                 best_auc_ep = ep + 1
                 # best_loss.pth 继续保留，兼容现有推理脚本
@@ -357,7 +363,7 @@ if __name__ == '__main__':
         # 真正早停：学习率到达最小值后，若ROC-AUC连续 early_stop_patience 轮未提升则停止
         if early_stop_patience > 0:
             if post_step_lr <= args.min_lr + 1e-12:
-                if np.isfinite(cur_auc) and cur_auc > min_lr_best_auc:
+                if np.isfinite(cur_auc) and cur_auc > min_lr_best_auc + args.auc_delta:
                     min_lr_best_auc = cur_auc
                     min_lr_no_improve_epochs = 0
                     print(f'[早停计数] 最小学习率下ROC-AUC提升至 {min_lr_best_auc:.4f}，计数重置')
