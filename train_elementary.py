@@ -220,10 +220,8 @@ if __name__ == '__main__':
     with open(log_dir, 'w') as Fout:
         json.dump(log_info, Fout)
 
-    # 跟踪最佳模型
-    # best_cls_f1, best_cls_ep = -1.0, 0
-    # best_reg_r2, best_reg_ep = -float('inf'), 0
-    best_total_loss, best_loss_ep = float('inf'), 0
+    # 跟踪最佳模型（按验证集ROC-AUC保存）
+    best_cls_auc, best_auc_ep = -float('inf'), 0
     min_lr_hold_epochs = 0
     early_stop_epoch = None
 
@@ -284,7 +282,11 @@ if __name__ == '__main__':
         #     f'召回率: {val_metric["classification"]["Recall"]:.4f}, '
         #     f'F1: {val_metric["classification"]["F1"]:.4f}, ')
         print(f'[验证总损失]: {val_metric["validation_loss"]["total_loss"]:.4f}')
-        print(f'[验证集] ACC: {val_metric["classification"]["ACC"]:.4f}, F1: {val_metric["classification"]["F1"]:.4f}')
+        print(
+            f'[验证集] ACC: {val_metric["classification"]["ACC"]:.4f}, '
+            f'F1: {val_metric["classification"]["F1"]:.4f}, '
+            f'ROC-AUC: {val_metric["classification"]["ROC_AUC"]:.4f}'
+        )
         print(f'[验证集] 分类混淆矩阵：\n{np.array(val_metric["classification"]["Confusion_Matrix"])}')
         print(f'[验证集] 回归 MAE: {val_metric["regression"]["MAE"]:.4f}, MSE: {val_metric["regression"]["MSE"]:.4f}, R2: {val_metric["regression"]["R2"]:.4f}')
         print('----------')
@@ -295,7 +297,11 @@ if __name__ == '__main__':
         #     f'精确率: {test_metric["classification"]["Precision"]:.4f}, '
         #     f'召回率: {test_metric["classification"]["Recall"]:.4f}, '
         #     f'F1: {test_metric["classification"]["F1"]:.4f}, ')
-        print(f'[测试集] ACC: {test_metric["classification"]["ACC"]:.4f}, F1: {test_metric["classification"]["F1"]:.4f}')
+        print(
+            f'[测试集] ACC: {test_metric["classification"]["ACC"]:.4f}, '
+            f'F1: {test_metric["classification"]["F1"]:.4f}, '
+            f'ROC-AUC: {test_metric["classification"]["ROC_AUC"]:.4f}'
+        )
         print(f'[测试集] 分类混淆矩阵：\n{np.array(test_metric["classification"]["Confusion_Matrix"])}')
         print(f'[测试集] 回归 MAE: {test_metric["regression"]["MAE"]:.4f}, MSE: {test_metric["regression"]["MSE"]:.4f}, R2: {test_metric["regression"]["R2"]:.4f}')
         print('----------')
@@ -329,26 +335,19 @@ if __name__ == '__main__':
             # else:
             #     print(f'[当前学习率] {new_lr:.6f}')
 
-        # 保存最佳模型
-        # if val_metric["classification"]["F1"] > best_cls_f1:
-        #     best_cls_f1 = val_metric["classification"]["F1"]
-        #     best_cls_ep = ep + 1
-        #     torch.save(model.state_dict(), best_cls_dir)
-        #     print(f'[最佳分类模型更新] 轮次: {best_cls_ep}, F1: {best_cls_f1:.4f}')
-        
-        # if val_metric["regression"]["R2"] > best_reg_r2:
-        #     best_reg_r2 = val_metric["regression"]["R2"]
-        #     best_reg_ep = ep + 1
-        #     torch.save(model.state_dict(), best_reg_dir)
-        #     print(f'[最佳回归模型更新] 轮次: {best_reg_ep}, '
-        #         f'R2: {best_reg_r2:.4f}, '
-        #         f'MAE: {val_metric["regression"]["MAE"]:.4f}, '
-        #         f'MSE: {val_metric["regression"]["MSE"]:.4f}')
-        if val_metric["validation_loss"]["total_loss"] < best_total_loss:
-            best_total_loss = val_metric["validation_loss"]["total_loss"]
-            best_loss_ep = ep + 1
-            torch.save(model.state_dict(), best_loss_dir)
-            print(f'[最佳模型更新] 轮次: {best_loss_ep}, 总损失: {best_total_loss:.4f}')
+        # 保存最佳模型：以验证集ROC-AUC为准（越大越好）
+        cur_auc = val_metric["classification"]["ROC_AUC"]
+        if np.isfinite(cur_auc):
+            if cur_auc > best_cls_auc:
+                best_cls_auc = cur_auc
+                best_auc_ep = ep + 1
+                # best_loss.pth 继续保留，兼容现有推理脚本
+                torch.save(model.state_dict(), best_loss_dir)
+                # 同时额外保存一份 best_cls.pth，语义更清晰
+                torch.save(model.state_dict(), best_cls_dir)
+                print(f'[最佳模型更新] 轮次: {best_auc_ep}, 验证ROC-AUC: {best_cls_auc:.4f}')
+        else:
+            print('[最佳模型更新] 当前验证ROC-AUC为NaN，跳过本轮AUC最优模型更新')
 
         # 真正早停：学习率到达最小值后，继续训练 early_stop_patience 轮即停止
         if early_stop_patience > 0:
@@ -375,16 +374,14 @@ if __name__ == '__main__':
     print('\n[训练完成]')
     if early_stop_epoch is not None:
         print(f'[训练提前结束] 早停轮次: {early_stop_epoch}')
-    # print(f'最佳分类模型：轮次 {best_cls_ep}, 验证F1 {best_cls_f1:.4f}')
-    # print(f'最佳回归模型：轮次 {best_reg_ep}, 验证R2 {best_reg_r2:.4f}, '
-    if best_loss_ep > 0:
-        print(f'最佳模型：轮次 {best_loss_ep}, 总损失: {best_total_loss:.4f}, '
-            f'验证F1 {log_info["valid_metric"][best_loss_ep - 1]["classification"]["F1"]:.4f}, '
-            f'验证R2 {log_info["valid_metric"][best_loss_ep - 1]["regression"]["R2"]:.4f}, '
-            f'验证MAE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MAE"]:.4f}, '
-            f'验证MSE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MSE"]:.4f}')
+    if best_auc_ep > 0:
+        print(f'最佳模型：轮次 {best_auc_ep}, 验证ROC-AUC: {best_cls_auc:.4f}, '
+            f'验证F1 {log_info["valid_metric"][best_auc_ep - 1]["classification"]["F1"]:.4f}, '
+            f'验证R2 {log_info["valid_metric"][best_auc_ep - 1]["regression"]["R2"]:.4f}, '
+            f'验证MAE {log_info["valid_metric"][best_auc_ep - 1]["regression"]["MAE"]:.4f}, '
+            f'验证MSE {log_info["valid_metric"][best_auc_ep - 1]["regression"]["MSE"]:.4f}')
     else:
-        print('未产生可用的最佳模型（训练可能在首轮前终止）')
+        print('未产生可用的AUC最优模型（可能因验证集单类导致ROC-AUC始终为NaN）')
     
     # # H200 训练结束后不会正常退出，尝试强制终止
     # import threading
