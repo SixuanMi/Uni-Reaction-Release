@@ -2,15 +2,37 @@
 set -euo pipefail
 
 # 用法: ./run_vote_train.sh DATA_PATH [EXTRA_TRAIN_ARGS...]
+#      ./run_vote_train.sh --data_path DATA_PATH [EXTRA_TRAIN_ARGS...]
 # DATA_PATH: 原始数据目录（包含 train/val/test 或 combined.csv）
-# 环境变量: N_FOLDS(默认5), TEST_SIZE(默认0.1), SEED(默认2025)
+# 环境变量:
+#   N_FOLDS(默认5), TEST_SIZE(默认0.1), SEED(默认2025)
+#   PARALLEL_JOBS(默认1): 同时训练的fold数量
+#   GPU_IDS(默认"0"): 逗号分隔GPU编号，按fold轮询分配
 
-DATA_PATH=${1:?please provide data path}
-shift || true
+if [[ "${1:-}" == "--data_path" ]]; then
+  DATA_PATH=${2:?please provide data path}
+  shift 2 || true
+else
+  DATA_PATH=${1:?please provide data path}
+  shift || true
+fi
 
 N_FOLDS=${N_FOLDS:-5}
 TEST_SIZE=${TEST_SIZE:-0.1}
 SEED=${SEED:-2025}
+PARALLEL_JOBS=${PARALLEL_JOBS:-1}
+GPU_IDS=${GPU_IDS:-0}
+
+if (( PARALLEL_JOBS < 1 )); then
+  echo "[ERROR] PARALLEL_JOBS 必须 >= 1，当前为 ${PARALLEL_JOBS}" >&2
+  exit 1
+fi
+
+IFS=',' read -r -a GPU_ARR <<< "${GPU_IDS}"
+if (( ${#GPU_ARR[@]} == 0 )); then
+  echo "[ERROR] GPU_IDS 不能为空" >&2
+  exit 1
+fi
 
 TS=$(date +%s)
 BASE_DIR="vote_run_${TS}"
@@ -25,12 +47,57 @@ python train_elementary_vote.py \
   --test_size "${TEST_SIZE}" \
   --seed "${SEED}"
 
-# 依次训练每个折的模型，日志/模型目录归档在 BASE_DIR 下
+# 并行训练每个折的模型，日志/模型目录归档在 BASE_DIR 下
 EXTRA_ARGS=("$@")
+PIDS=()
+PIDS_INFO=()
+
+echo "[INFO] 开始训练：并发数 ${PARALLEL_JOBS}, GPU列表 ${GPU_IDS}"
 for i in $(seq 1 "$N_FOLDS"); do
   FOLD_DIR="${SPLIT_DIR}/fold_${i}"
   LOG_DIR="${LOG_ROOT}/fold_${i}"
+  gpu_idx=$(( (i - 1) % ${#GPU_ARR[@]} ))
+  gpu_id="${GPU_ARR[$gpu_idx]}"
+  mkdir -p "${LOG_DIR}"
+  LOG_FILE="${LOG_DIR}/train.log"
+
+  while (( $(jobs -pr | wc -l) >= PARALLEL_JOBS )); do
+    sleep 2
+  done
+
   echo "========================================="
-  echo "[INFO] 训练折 ${i}/${N_FOLDS}，数据 ${FOLD_DIR}，日志根目录 ${LOG_DIR}"
-  python train_elementary.py --data_path "${FOLD_DIR}" --base_log "${LOG_DIR}" "${EXTRA_ARGS[@]}"
+  echo "[INFO] 启动折 ${i}/${N_FOLDS}，GPU ${gpu_id}，数据 ${FOLD_DIR}，日志根目录 ${LOG_DIR}"
+  (
+    set -euo pipefail
+    python train_elementary.py \
+      --data_path "${FOLD_DIR}" \
+      --base_log "${LOG_DIR}" \
+      --device "${gpu_id}" \
+      "${EXTRA_ARGS[@]}" \
+      > "${LOG_FILE}" 2>&1
+  ) &
+  pid=$!
+  PIDS+=("${pid}")
+  PIDS_INFO+=("fold_${i}:gpu_${gpu_id}:pid_${pid}:log_${LOG_FILE}")
 done
+
+echo "========================================="
+echo "[INFO] 等待全部fold训练结束..."
+fail=0
+for idx in "${!PIDS[@]}"; do
+  pid="${PIDS[$idx]}"
+  info="${PIDS_INFO[$idx]}"
+  if wait "${pid}"; then
+    echo "[INFO] 完成 ${info}"
+  else
+    echo "[ERROR] 失败 ${info}" >&2
+    fail=1
+  fi
+done
+
+if (( fail != 0 )); then
+  echo "[ERROR] 部分fold训练失败，请查看对应 train.log" >&2
+  exit 1
+fi
+
+echo "[INFO] 全部fold训练完成"
