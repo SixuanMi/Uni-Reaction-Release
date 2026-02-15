@@ -50,6 +50,7 @@ if __name__ == '__main__':
     parser.add_argument('--warmup', type=int, default=20, help='热身轮数')
     parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数') # 0.7
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
+    parser.add_argument('--min_lr', type=float, default=1e-6, help='学习率最小值（用于LR调度与早停触发）')
     parser.add_argument('--lr', type=float, default=5e-4, help='初始学习率') # 1e-3
     parser.add_argument('--epoch', type=int, default=120, help='训练总轮数') # 100-200
     parser.add_argument('--base_log', type=str, default='log_joint', help='日志保存根目录')
@@ -67,6 +68,12 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_init', type=float, default=5e-3, help='初始λ（fixed模式下为固定值，dynamic模式下为初始值）')
     parser.add_argument('--alpha', type=float, default=0.1, help='动态权重调整系数（值越小，调整越平滑）')
     parser.add_argument('--cls_out_dim', type=int, default=2, help='分类任务输出维度（如2分类）')
+    parser.add_argument(
+        '--early_stop_patience',
+        type=int,
+        default=None,
+        help='早停轮数（默认lrpatience*2，仅在学习率到达最小值后开始计数）'
+    )
     # 条件编码器相关参数（保留，默认不启用）
     parser.add_argument('--use_condition', action='store_true', help='是否启用条件编码器（默认不启用）')
     parser.add_argument('--condition_config', type=str, default='', help='条件编码器配置文件路径（use_condition=True时需提供）')
@@ -90,6 +97,16 @@ if __name__ == '__main__':
         current_lambda = args.lambda_init
     else:
         current_lambda = args.lambda_init  # 动态模式下的初始值
+
+    # 早停参数：默认等于学习率衰减耐心轮数的2倍
+    if args.early_stop_patience is None:
+        early_stop_patience = args.lrpatience * 2
+    else:
+        early_stop_patience = args.early_stop_patience
+    if early_stop_patience < 0:
+        raise ValueError("--early_stop_patience 不能为负数")
+    if args.min_lr <= 0:
+        raise ValueError("--min_lr 必须大于0")
         
     # 加载双任务数据
     train_set, val_set, test_set = load_joint_data(args.data_path)
@@ -178,14 +195,18 @@ if __name__ == '__main__':
         mode='min',             # 匹配loss：越小越好
         factor=args.lrfactor,   # 衰减系数（每次衰减为原来百分比%）
         patience=args.lrpatience,  # 验证集指标10轮没提升则衰减
-        min_lr=1e-6,
+        min_lr=args.min_lr,
         # min_lr=1e-5,            # 最小学习率（避免衰减到0）
     )
+    print(f'[早停设置] min_lr={args.min_lr:.6f}, early_stop_patience={early_stop_patience}')
 
 
     # 日志初始化
     log_info = {
         'args': args.__dict__,
+        'early_stop_patience': early_stop_patience,
+        'early_stop_min_lr': args.min_lr,
+        'early_stop_epoch': None,
         'train_total_loss': [],
         'train_cls_loss': [],
         'train_reg_loss': [],
@@ -203,6 +224,8 @@ if __name__ == '__main__':
     # best_cls_f1, best_cls_ep = -1.0, 0
     # best_reg_r2, best_reg_ep = -float('inf'), 0
     best_total_loss, best_loss_ep = float('inf'), 0
+    min_lr_hold_epochs = 0
+    early_stop_epoch = None
 
     # 训练循环
     for ep in range(args.epoch):
@@ -289,19 +312,20 @@ if __name__ == '__main__':
             json.dump(log_info, Fout, indent=4)
 
         # 学习率衰减
+        post_step_lr = optimizer.param_groups[0]['lr']
         if ep >= args.warmup and ep >= args.step_start:
             # val_metrics = val_metric["classification"]["F1"] + val_metric["regression"]["R2"]
             # metrics = train_total_loss
             metrics = val_metric["validation_loss"]["total_loss"]
             prev_lr = current_lr
             lr_sher.step(metrics)
-            new_lr = optimizer.param_groups[0]['lr']
+            post_step_lr = optimizer.param_groups[0]['lr']
             
             # 打印学习率状态
-            if new_lr < prev_lr:
-                print(f'[学习率衰减] {prev_lr:.6f} → {new_lr:.6f}')
-            elif new_lr == 1e-6:
-                print(f'[当前学习率] 已达最小学习率 {new_lr:.6f}，停止衰减')
+            if post_step_lr < prev_lr:
+                print(f'[学习率衰减] {prev_lr:.6f} → {post_step_lr:.6f}')
+            elif np.isclose(post_step_lr, args.min_lr, atol=1e-12, rtol=0.0):
+                print(f'[当前学习率] 已达最小学习率 {post_step_lr:.6f}，停止衰减')
             # else:
             #     print(f'[当前学习率] {new_lr:.6f}')
 
@@ -325,17 +349,42 @@ if __name__ == '__main__':
             best_loss_ep = ep + 1
             torch.save(model.state_dict(), best_loss_dir)
             print(f'[最佳模型更新] 轮次: {best_loss_ep}, 总损失: {best_total_loss:.4f}')
-        
+
+        # 真正早停：学习率到达最小值后，继续训练 early_stop_patience 轮即停止
+        if early_stop_patience > 0:
+            if post_step_lr <= args.min_lr + 1e-12:
+                min_lr_hold_epochs += 1
+                print(
+                    f'[早停计数] 最小学习率保持轮数: '
+                    f'{min_lr_hold_epochs}/{early_stop_patience}'
+                )
+                if min_lr_hold_epochs >= early_stop_patience:
+                    early_stop_epoch = ep + 1
+                    log_info['early_stop_epoch'] = early_stop_epoch
+                    with open(log_dir, 'w') as Fout:
+                        json.dump(log_info, Fout, indent=4)
+                    print(
+                        f'[早停触发] 学习率达到最小值后累计 '
+                        f'{early_stop_patience} 轮，提前结束训练（第{early_stop_epoch}轮）'
+                    )
+                    break
+            else:
+                min_lr_hold_epochs = 0
 
     # 输出最终结果
     print('\n[训练完成]')
+    if early_stop_epoch is not None:
+        print(f'[训练提前结束] 早停轮次: {early_stop_epoch}')
     # print(f'最佳分类模型：轮次 {best_cls_ep}, 验证F1 {best_cls_f1:.4f}')
     # print(f'最佳回归模型：轮次 {best_reg_ep}, 验证R2 {best_reg_r2:.4f}, '
-    print(f'最佳模型：轮次 {best_loss_ep}, 总损失: {best_total_loss:.4f}, '
-        f'验证F1 {log_info["valid_metric"][best_loss_ep - 1]["classification"]["F1"]:.4f}, '
-        f'验证R2 {log_info["valid_metric"][best_loss_ep - 1]["regression"]["R2"]:.4f}, '
-        f'验证MAE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MAE"]:.4f}, '
-        f'验证MSE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MSE"]:.4f}')
+    if best_loss_ep > 0:
+        print(f'最佳模型：轮次 {best_loss_ep}, 总损失: {best_total_loss:.4f}, '
+            f'验证F1 {log_info["valid_metric"][best_loss_ep - 1]["classification"]["F1"]:.4f}, '
+            f'验证R2 {log_info["valid_metric"][best_loss_ep - 1]["regression"]["R2"]:.4f}, '
+            f'验证MAE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MAE"]:.4f}, '
+            f'验证MSE {log_info["valid_metric"][best_loss_ep - 1]["regression"]["MSE"]:.4f}')
+    else:
+        print('未产生可用的最佳模型（训练可能在首轮前终止）')
     
     # # H200 训练结束后不会正常退出，尝试强制终止
     # import threading
