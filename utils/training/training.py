@@ -413,7 +413,8 @@ def train_joint(
         
         if num_valid_reg > 0:
             # 只对有效样本计算MSE
-            reg_pred_valid = reg_out.squeeze()[reg_valid_mask]
+            # 用 view(-1) 避免 batch_size=1 时 squeeze 变成标量导致索引异常
+            reg_pred_valid = reg_out.view(-1)[reg_valid_mask]
             reg_label_valid = reg_label[reg_valid_mask]
             reg_loss = mse_loss(reg_pred_valid, reg_label_valid)
         else:
