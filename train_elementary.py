@@ -191,14 +191,18 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     # lr_sher = ExponentialLR(optimizer, gamma=args.lrgamma)
     lr_sher = ReduceLROnPlateau(
-        optimizer, 
-        mode='min',             # 匹配loss：越小越好
-        factor=args.lrfactor,   # 衰减系数（每次衰减为原来百分比%）
-        patience=args.lrpatience,  # 验证集指标10轮没提升则衰减
+        optimizer,
+        mode='max',             # 匹配ROC-AUC：越大越好
+        factor=args.lrfactor,   # 衰减系数（每次衰减为原来百分比）
+        patience=args.lrpatience,  # 验证集指标连续未提升轮数达到阈值后衰减
         min_lr=args.min_lr,
         # min_lr=1e-5,            # 最小学习率（避免衰减到0）
     )
-    print(f'[早停设置] min_lr={args.min_lr:.6f}, early_stop_patience={early_stop_patience}')
+    print(
+        f'[早停设置] min_lr={args.min_lr:.6f}, '
+        f'early_stop_patience={early_stop_patience}, '
+        'metric=val ROC-AUC'
+    )
 
 
     # 日志初始化
@@ -222,7 +226,8 @@ if __name__ == '__main__':
 
     # 跟踪最佳模型（按验证集ROC-AUC保存）
     best_cls_auc, best_auc_ep = -float('inf'), 0
-    min_lr_hold_epochs = 0
+    min_lr_no_improve_epochs = 0
+    min_lr_best_auc = -float('inf')
     early_stop_epoch = None
 
     # 训练循环
@@ -317,26 +322,26 @@ if __name__ == '__main__':
         with open(log_dir, 'w') as Fout:
             json.dump(log_info, Fout, indent=4)
 
-        # 学习率衰减
+        # 当前验证AUC（用于调度器、最佳模型和早停）
+        cur_auc = val_metric["classification"]["ROC_AUC"]
+
+        # 学习率调度（基于验证ROC-AUC）
         post_step_lr = optimizer.param_groups[0]['lr']
         if ep >= args.warmup and ep >= args.step_start:
-            # val_metrics = val_metric["classification"]["F1"] + val_metric["regression"]["R2"]
-            # metrics = train_total_loss
-            metrics = val_metric["validation_loss"]["total_loss"]
             prev_lr = current_lr
-            lr_sher.step(metrics)
-            post_step_lr = optimizer.param_groups[0]['lr']
-            
-            # 打印学习率状态
-            if post_step_lr < prev_lr:
-                print(f'[学习率衰减] {prev_lr:.6f} → {post_step_lr:.6f}')
-            elif np.isclose(post_step_lr, args.min_lr, atol=1e-12, rtol=0.0):
-                print(f'[当前学习率] 已达最小学习率 {post_step_lr:.6f}，停止衰减')
-            # else:
-            #     print(f'[当前学习率] {new_lr:.6f}')
+            if np.isfinite(cur_auc):
+                lr_sher.step(cur_auc)
+                post_step_lr = optimizer.param_groups[0]['lr']
+
+                # 打印学习率状态
+                if post_step_lr < prev_lr:
+                    print(f'[学习率衰减] {prev_lr:.6f} → {post_step_lr:.6f}')
+                elif np.isclose(post_step_lr, args.min_lr, atol=1e-12, rtol=0.0):
+                    print(f'[当前学习率] 已达最小学习率 {post_step_lr:.6f}，停止衰减')
+            else:
+                print('[学习率调度] 当前验证ROC-AUC为NaN，跳过本轮调度')
 
         # 保存最佳模型：以验证集ROC-AUC为准（越大越好）
-        cur_auc = val_metric["classification"]["ROC_AUC"]
         if np.isfinite(cur_auc):
             if cur_auc > best_cls_auc:
                 best_cls_auc = cur_auc
@@ -349,26 +354,39 @@ if __name__ == '__main__':
         else:
             print('[最佳模型更新] 当前验证ROC-AUC为NaN，跳过本轮AUC最优模型更新')
 
-        # 真正早停：学习率到达最小值后，继续训练 early_stop_patience 轮即停止
+        # 真正早停：学习率到达最小值后，若ROC-AUC连续 early_stop_patience 轮未提升则停止
         if early_stop_patience > 0:
             if post_step_lr <= args.min_lr + 1e-12:
-                min_lr_hold_epochs += 1
-                print(
-                    f'[早停计数] 最小学习率保持轮数: '
-                    f'{min_lr_hold_epochs}/{early_stop_patience}'
-                )
-                if min_lr_hold_epochs >= early_stop_patience:
+                if np.isfinite(cur_auc) and cur_auc > min_lr_best_auc:
+                    min_lr_best_auc = cur_auc
+                    min_lr_no_improve_epochs = 0
+                    print(f'[早停计数] 最小学习率下ROC-AUC提升至 {min_lr_best_auc:.4f}，计数重置')
+                else:
+                    min_lr_no_improve_epochs += 1
+                    if np.isfinite(cur_auc):
+                        print(
+                            f'[早停计数] 最小学习率下ROC-AUC未提升轮数: '
+                            f'{min_lr_no_improve_epochs}/{early_stop_patience}'
+                        )
+                    else:
+                        print(
+                            f'[早停计数] 最小学习率下ROC-AUC为NaN，按未提升计数: '
+                            f'{min_lr_no_improve_epochs}/{early_stop_patience}'
+                        )
+
+                if min_lr_no_improve_epochs >= early_stop_patience:
                     early_stop_epoch = ep + 1
                     log_info['early_stop_epoch'] = early_stop_epoch
                     with open(log_dir, 'w') as Fout:
                         json.dump(log_info, Fout, indent=4)
                     print(
-                        f'[早停触发] 学习率达到最小值后累计 '
-                        f'{early_stop_patience} 轮，提前结束训练（第{early_stop_epoch}轮）'
+                        f'[早停触发] 最小学习率下ROC-AUC连续 '
+                        f'{early_stop_patience} 轮未提升，提前结束训练（第{early_stop_epoch}轮）'
                     )
                     break
             else:
-                min_lr_hold_epochs = 0
+                min_lr_no_improve_epochs = 0
+                min_lr_best_auc = -float('inf')
 
     # 输出最终结果
     print('\n[训练完成]')
