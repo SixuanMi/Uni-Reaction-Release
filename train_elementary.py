@@ -296,7 +296,9 @@ if __name__ == '__main__':
         print(
             f'[验证集] ACC: {val_metric["classification"]["ACC"]:.4f}, '
             f'F1: {val_metric["classification"]["F1"]:.4f}, '
-            f'PR-AUC: {val_metric["classification"]["PR_AUC"]:.4f}'
+            f'PR-AUC: {val_metric["classification"]["PR_AUC"]:.4f}, '
+            f'PR阈值(max-F1): {val_metric["classification"]["PR_BEST_F1_THRESHOLD"]:.4f}, '
+            f'PR-maxF1: {val_metric["classification"]["PR_BEST_F1"]:.4f}'
         )
         print(f'[验证集] 分类混淆矩阵：\n{np.array(val_metric["classification"]["Confusion_Matrix"])}')
         print(f'[验证集] 回归 MAE: {val_metric["regression"]["MAE"]:.4f}, MSE: {val_metric["regression"]["MSE"]:.4f}, R2: {val_metric["regression"]["R2"]:.4f}')
@@ -311,7 +313,9 @@ if __name__ == '__main__':
         print(
             f'[测试集] ACC: {test_metric["classification"]["ACC"]:.4f}, '
             f'F1: {test_metric["classification"]["F1"]:.4f}, '
-            f'PR-AUC: {test_metric["classification"]["PR_AUC"]:.4f}'
+            f'PR-AUC: {test_metric["classification"]["PR_AUC"]:.4f}, '
+            f'PR阈值(max-F1): {test_metric["classification"]["PR_BEST_F1_THRESHOLD"]:.4f}, '
+            f'PR-maxF1: {test_metric["classification"]["PR_BEST_F1"]:.4f}'
         )
         print(f'[测试集] 分类混淆矩阵：\n{np.array(test_metric["classification"]["Confusion_Matrix"])}')
         print(f'[测试集] 回归 MAE: {test_metric["regression"]["MAE"]:.4f}, MSE: {test_metric["regression"]["MSE"]:.4f}, R2: {test_metric["regression"]["R2"]:.4f}')

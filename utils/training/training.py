@@ -7,7 +7,7 @@ from torch.nn.functional import kl_div, mse_loss, softmax, cross_entropy
 from sklearn.metrics import (
     mean_squared_error, mean_absolute_error, r2_score, 
     confusion_matrix, precision_score, recall_score, f1_score,
-    average_precision_score
+    average_precision_score, precision_recall_curve
 )
 
 from ..tensor_utils import (
@@ -582,11 +582,24 @@ def eval_joint(
     # 5. PR-AUC（二分类主任务）
     # 注意：PR-AUC 需要同时存在正负样本，否则此处按不可定义处理（返回 NaN）
     cls_pr_auc = float('nan')
+    cls_pr_best_f1 = float('nan')
+    cls_pr_best_threshold = float('nan')
     if num_classes == 2:
         cls_true_bin = (cls_true == pos_label).astype(np.int32)
         if np.unique(cls_true_bin).size >= 2:
             try:
                 cls_pr_auc = float(average_precision_score(cls_true_bin, cls_scores))
+                # 从PR曲线中选取 max-F1 对应阈值作为可解释分类阈值
+                pr_precision, pr_recall, pr_thresholds = precision_recall_curve(
+                    cls_true_bin, cls_scores
+                )
+                if pr_thresholds.size > 0:
+                    pr_f1 = 2 * pr_precision[:-1] * pr_recall[:-1] / np.clip(
+                        pr_precision[:-1] + pr_recall[:-1], 1e-12, None
+                    )
+                    best_idx = int(np.nanargmax(pr_f1))
+                    cls_pr_best_f1 = float(pr_f1[best_idx])
+                    cls_pr_best_threshold = float(pr_thresholds[best_idx])
             except Exception as e:
                 print(f"[警告] PR-AUC 计算异常：{e}，指标设为NaN")
     
@@ -613,6 +626,8 @@ def eval_joint(
             'Recall': cls_recall,        # 召回率
             'F1': cls_f1,                # F1分数
             'PR_AUC': cls_pr_auc,        # PR曲线下面积（二分类）
+            'PR_BEST_F1': cls_pr_best_f1,  # PR曲线中最大F1
+            'PR_BEST_F1_THRESHOLD': cls_pr_best_threshold,  # 最大F1对应阈值
             'Confusion_Matrix': cls_cm.tolist()  # 混淆矩阵（转为列表方便日志存储）
         },
         'regression': {'MAE': reg_mae, 'MSE': reg_mse, 'R2': reg_r2},
