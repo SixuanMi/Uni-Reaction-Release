@@ -6,7 +6,8 @@ from tqdm import tqdm
 from torch.nn.functional import kl_div, mse_loss, softmax, cross_entropy
 from sklearn.metrics import (
     mean_squared_error, mean_absolute_error, r2_score, 
-    confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score
+    confusion_matrix, precision_score, recall_score, f1_score,
+    average_precision_score
 )
 
 from ..tensor_utils import (
@@ -578,16 +579,16 @@ def eval_joint(
         cls_precision = cls_recall = cls_f1 = 0.0
         print(f"[警告] 分类指标计算异常：{e}，指标设为0.0")
 
-    # 5. ROC-AUC（二分类主任务）
-    # 注意：AUC 需要同时存在正负样本，否则不可定义（返回 NaN）
-    cls_roc_auc = float('nan')
+    # 5. PR-AUC（二分类主任务）
+    # 注意：PR-AUC 需要同时存在正负样本，否则此处按不可定义处理（返回 NaN）
+    cls_pr_auc = float('nan')
     if num_classes == 2:
         cls_true_bin = (cls_true == pos_label).astype(np.int32)
         if np.unique(cls_true_bin).size >= 2:
             try:
-                cls_roc_auc = float(roc_auc_score(cls_true_bin, cls_scores))
+                cls_pr_auc = float(average_precision_score(cls_true_bin, cls_scores))
             except Exception as e:
-                print(f"[警告] ROC-AUC 计算异常：{e}，指标设为NaN")
+                print(f"[警告] PR-AUC 计算异常：{e}，指标设为NaN")
     
     # --------------------------
     # 回归指标计算（原有逻辑完全不变）
@@ -611,7 +612,7 @@ def eval_joint(
             'Precision': cls_precision,  # 精确率
             'Recall': cls_recall,        # 召回率
             'F1': cls_f1,                # F1分数
-            'ROC_AUC': cls_roc_auc,      # ROC曲线下面积（二分类）
+            'PR_AUC': cls_pr_auc,        # PR曲线下面积（二分类）
             'Confusion_Matrix': cls_cm.tolist()  # 混淆矩阵（转为列表方便日志存储）
         },
         'regression': {'MAE': reg_mae, 'MSE': reg_mse, 'R2': reg_r2},

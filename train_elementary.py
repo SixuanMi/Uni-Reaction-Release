@@ -50,7 +50,7 @@ if __name__ == '__main__':
     parser.add_argument('--warmup', type=int, default=20, help='热身轮数')
     parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数') # 0.7
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
-    parser.add_argument('--auc_delta', type=float, default=1e-4, help='AUC最小提升阈值（用于LR调度/最佳模型/早停）')
+    parser.add_argument('--auc_delta', type=float, default=1e-4, help='PR-AUC最小提升阈值（用于LR调度/最佳模型/早停）')
     parser.add_argument('--min_lr', type=float, default=1e-6, help='学习率最小值（用于LR调度与早停触发）')
     parser.add_argument('--lr', type=float, default=5e-4, help='初始学习率') # 1e-3
     parser.add_argument('--epoch', type=int, default=120, help='训练总轮数') # 100-200
@@ -195,7 +195,7 @@ if __name__ == '__main__':
     # lr_sher = ExponentialLR(optimizer, gamma=args.lrgamma)
     lr_sher = ReduceLROnPlateau(
         optimizer,
-        mode='max',             # 匹配ROC-AUC：越大越好
+        mode='max',             # 匹配PR-AUC：越大越好
         factor=args.lrfactor,   # 衰减系数（每次衰减为原来百分比）
         patience=args.lrpatience,  # 验证集指标连续未提升轮数达到阈值后衰减
         threshold=args.auc_delta,
@@ -206,7 +206,7 @@ if __name__ == '__main__':
     print(
         f'[早停设置] min_lr={args.min_lr:.6f}, '
         f'early_stop_patience={early_stop_patience}, '
-        f'metric=val ROC-AUC, auc_delta={args.auc_delta:.1e}'
+        f'metric=val PR-AUC, auc_delta={args.auc_delta:.1e}'
     )
 
 
@@ -230,10 +230,10 @@ if __name__ == '__main__':
     with open(log_dir, 'w') as Fout:
         json.dump(log_info, Fout)
 
-    # 跟踪最佳模型（按验证集ROC-AUC保存）
-    best_cls_auc, best_auc_ep = -float('inf'), 0
+    # 跟踪最佳模型（按验证集PR-AUC保存）
+    best_cls_pr_auc, best_pr_auc_ep = -float('inf'), 0
     min_lr_no_improve_epochs = 0
-    min_lr_best_auc = -float('inf')
+    min_lr_best_pr_auc = -float('inf')
     early_stop_epoch = None
 
     # 训练循环
@@ -296,7 +296,7 @@ if __name__ == '__main__':
         print(
             f'[验证集] ACC: {val_metric["classification"]["ACC"]:.4f}, '
             f'F1: {val_metric["classification"]["F1"]:.4f}, '
-            f'ROC-AUC: {val_metric["classification"]["ROC_AUC"]:.4f}'
+            f'PR-AUC: {val_metric["classification"]["PR_AUC"]:.4f}'
         )
         print(f'[验证集] 分类混淆矩阵：\n{np.array(val_metric["classification"]["Confusion_Matrix"])}')
         print(f'[验证集] 回归 MAE: {val_metric["regression"]["MAE"]:.4f}, MSE: {val_metric["regression"]["MSE"]:.4f}, R2: {val_metric["regression"]["R2"]:.4f}')
@@ -311,7 +311,7 @@ if __name__ == '__main__':
         print(
             f'[测试集] ACC: {test_metric["classification"]["ACC"]:.4f}, '
             f'F1: {test_metric["classification"]["F1"]:.4f}, '
-            f'ROC-AUC: {test_metric["classification"]["ROC_AUC"]:.4f}'
+            f'PR-AUC: {test_metric["classification"]["PR_AUC"]:.4f}'
         )
         print(f'[测试集] 分类混淆矩阵：\n{np.array(test_metric["classification"]["Confusion_Matrix"])}')
         print(f'[测试集] 回归 MAE: {test_metric["regression"]["MAE"]:.4f}, MSE: {test_metric["regression"]["MSE"]:.4f}, R2: {test_metric["regression"]["R2"]:.4f}')
@@ -328,15 +328,15 @@ if __name__ == '__main__':
         with open(log_dir, 'w') as Fout:
             json.dump(log_info, Fout, indent=4)
 
-        # 当前验证AUC（用于调度器、最佳模型和早停）
-        cur_auc = val_metric["classification"]["ROC_AUC"]
+        # 当前验证PR-AUC（用于调度器、最佳模型和早停）
+        cur_pr_auc = val_metric["classification"]["PR_AUC"]
 
-        # 学习率调度（基于验证ROC-AUC）
+        # 学习率调度（基于验证PR-AUC）
         post_step_lr = optimizer.param_groups[0]['lr']
         if ep >= args.warmup and ep >= args.step_start:
             prev_lr = current_lr
-            if np.isfinite(cur_auc):
-                lr_sher.step(cur_auc)
+            if np.isfinite(cur_pr_auc):
+                lr_sher.step(cur_pr_auc)
                 post_step_lr = optimizer.param_groups[0]['lr']
 
                 # 打印学习率状态
@@ -345,38 +345,38 @@ if __name__ == '__main__':
                 elif np.isclose(post_step_lr, args.min_lr, atol=1e-12, rtol=0.0):
                     print(f'[当前学习率] 已达最小学习率 {post_step_lr:.6f}，停止衰减')
             else:
-                print('[学习率调度] 当前验证ROC-AUC为NaN，跳过本轮调度')
+                print('[学习率调度] 当前验证PR-AUC为NaN，跳过本轮调度')
 
-        # 保存最佳模型：以验证集ROC-AUC为准（需提升超过auc_delta）
-        if np.isfinite(cur_auc):
-            if cur_auc > best_cls_auc + args.auc_delta:
-                best_cls_auc = cur_auc
-                best_auc_ep = ep + 1
+        # 保存最佳模型：以验证集PR-AUC为准（需提升超过auc_delta）
+        if np.isfinite(cur_pr_auc):
+            if cur_pr_auc > best_cls_pr_auc + args.auc_delta:
+                best_cls_pr_auc = cur_pr_auc
+                best_pr_auc_ep = ep + 1
                 # best_loss.pth 继续保留，兼容现有推理脚本
                 torch.save(model.state_dict(), best_loss_dir)
                 # 同时额外保存一份 best_cls.pth，语义更清晰
                 torch.save(model.state_dict(), best_cls_dir)
-                print(f'[最佳模型更新] 轮次: {best_auc_ep}, 验证ROC-AUC: {best_cls_auc:.4f}')
+                print(f'[最佳模型更新] 轮次: {best_pr_auc_ep}, 验证PR-AUC: {best_cls_pr_auc:.4f}')
         else:
-            print('[最佳模型更新] 当前验证ROC-AUC为NaN，跳过本轮AUC最优模型更新')
+            print('[最佳模型更新] 当前验证PR-AUC为NaN，跳过本轮AUC最优模型更新')
 
-        # 真正早停：学习率到达最小值后，若ROC-AUC连续 early_stop_patience 轮未提升则停止
+        # 真正早停：学习率到达最小值后，若PR-AUC连续 early_stop_patience 轮未提升则停止
         if early_stop_patience > 0:
             if post_step_lr <= args.min_lr + 1e-12:
-                if np.isfinite(cur_auc) and cur_auc > min_lr_best_auc + args.auc_delta:
-                    min_lr_best_auc = cur_auc
+                if np.isfinite(cur_pr_auc) and cur_pr_auc > min_lr_best_pr_auc + args.auc_delta:
+                    min_lr_best_pr_auc = cur_pr_auc
                     min_lr_no_improve_epochs = 0
-                    print(f'[早停计数] 最小学习率下ROC-AUC提升至 {min_lr_best_auc:.4f}，计数重置')
+                    print(f'[早停计数] 最小学习率下PR-AUC提升至 {min_lr_best_pr_auc:.4f}，计数重置')
                 else:
                     min_lr_no_improve_epochs += 1
-                    if np.isfinite(cur_auc):
+                    if np.isfinite(cur_pr_auc):
                         print(
-                            f'[早停计数] 最小学习率下ROC-AUC未提升轮数: '
+                            f'[早停计数] 最小学习率下PR-AUC未提升轮数: '
                             f'{min_lr_no_improve_epochs}/{early_stop_patience}'
                         )
                     else:
                         print(
-                            f'[早停计数] 最小学习率下ROC-AUC为NaN，按未提升计数: '
+                            f'[早停计数] 最小学习率下PR-AUC为NaN，按未提升计数: '
                             f'{min_lr_no_improve_epochs}/{early_stop_patience}'
                         )
 
@@ -386,26 +386,26 @@ if __name__ == '__main__':
                     with open(log_dir, 'w') as Fout:
                         json.dump(log_info, Fout, indent=4)
                     print(
-                        f'[早停触发] 最小学习率下ROC-AUC连续 '
+                        f'[早停触发] 最小学习率下PR-AUC连续 '
                         f'{early_stop_patience} 轮未提升，提前结束训练（第{early_stop_epoch}轮）'
                     )
                     break
             else:
                 min_lr_no_improve_epochs = 0
-                min_lr_best_auc = -float('inf')
+                min_lr_best_pr_auc = -float('inf')
 
     # 输出最终结果
     print('\n[训练完成]')
     if early_stop_epoch is not None:
         print(f'[训练提前结束] 早停轮次: {early_stop_epoch}')
-    if best_auc_ep > 0:
-        print(f'最佳模型：轮次 {best_auc_ep}, 验证ROC-AUC: {best_cls_auc:.4f}, '
-            f'验证F1 {log_info["valid_metric"][best_auc_ep - 1]["classification"]["F1"]:.4f}, '
-            f'验证R2 {log_info["valid_metric"][best_auc_ep - 1]["regression"]["R2"]:.4f}, '
-            f'验证MAE {log_info["valid_metric"][best_auc_ep - 1]["regression"]["MAE"]:.4f}, '
-            f'验证MSE {log_info["valid_metric"][best_auc_ep - 1]["regression"]["MSE"]:.4f}')
+    if best_pr_auc_ep > 0:
+        print(f'最佳模型：轮次 {best_pr_auc_ep}, 验证PR-AUC: {best_cls_pr_auc:.4f}, '
+            f'验证F1 {log_info["valid_metric"][best_pr_auc_ep - 1]["classification"]["F1"]:.4f}, '
+            f'验证R2 {log_info["valid_metric"][best_pr_auc_ep - 1]["regression"]["R2"]:.4f}, '
+            f'验证MAE {log_info["valid_metric"][best_pr_auc_ep - 1]["regression"]["MAE"]:.4f}, '
+            f'验证MSE {log_info["valid_metric"][best_pr_auc_ep - 1]["regression"]["MSE"]:.4f}')
     else:
-        print('未产生可用的AUC最优模型（可能因验证集单类导致ROC-AUC始终为NaN）')
+        print('未产生可用的AUC最优模型（可能因验证集单类导致PR-AUC始终为NaN）')
     
     # # H200 训练结束后不会正常退出，尝试强制终止
     # import threading
