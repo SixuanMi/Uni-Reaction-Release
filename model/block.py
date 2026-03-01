@@ -58,10 +58,11 @@ class RAlignEncoder(torch.nn.Module):
         self, n_layer, emb_dim, heads, edge_dim, reac_batch_infos={},
         reac_num_keys={}, prod_batch_infos={}, prod_num_keys={},
         dropout=0.1, negative_slope=0.2, update_last_edge=False,
-        use_lg_lin=True
+        use_lg_lin=True, use_local_pe=False, fusion_mode='legacy'
     ):
         super(RAlignEncoder, self).__init__()
         self.n_layers = n_layer
+        self.use_local_pe = use_local_pe
         self.layers = torch.nn.ModuleList()
         for i in range(n_layer):
             update_edge = (i < n_layer - 1) or update_last_edge
@@ -70,13 +71,16 @@ class RAlignEncoder(torch.nn.Module):
                 reac_batch_infos=reac_batch_infos, reac_num_keys=reac_num_keys,
                 prod_batch_infos=prod_batch_infos, prod_num_keys=prod_num_keys,
                 negative_slope=negative_slope, dropout=dropout,
-                edge_update=update_edge, use_lg_lin=use_lg_lin
+                edge_update=update_edge, use_lg_lin=use_lg_lin,
+                use_local_pe=use_local_pe, fusion_mode=fusion_mode
             ))
 
         self.update_last_edge = update_last_edge
 
         self.atom_encoder = AtomEncoder(emb_dim)
         self.bond_encoder = BondEncoder(emb_dim)
+        self.local_pe_emb = torch.nn.Embedding(5, emb_dim) \
+            if use_local_pe else None
 
     def forward(
         self, reac_graph, prod_graph,
@@ -87,6 +91,13 @@ class RAlignEncoder(torch.nn.Module):
         prod_x = self.atom_encoder(prod_graph.x)
         reac_e = self.bond_encoder(reac_graph.edge_attr)
         prod_e = self.bond_encoder(prod_graph.edge_attr)
+        if self.use_local_pe:
+            if not hasattr(reac_graph, 'local_pe') or not hasattr(prod_graph, 'local_pe'):
+                raise ValueError('local_pe features are required when enabled')
+            reac_pe = self.local_pe_emb(reac_graph.local_pe)
+            prod_pe = self.local_pe_emb(prod_graph.local_pe)
+        else:
+            reac_pe, prod_pe = None, None
         for i in range(self.n_layers):
             reac_x, prod_x, reac_e, prod_e = self.layers[i](
                 reac_x=reac_x, reac_e=reac_e,
@@ -99,7 +110,8 @@ class RAlignEncoder(torch.nn.Module):
                 prod_eidx=prod_graph.edge_index,
                 prod_bmask=prod_graph.batch_mask,
                 prod_batched_condition=prod_batched_condition,
-                prod_num_conditions=prod_num_conditions
+                prod_num_conditions=prod_num_conditions,
+                reac_pe=reac_pe, prod_pe=prod_pe
             )
 
         return reac_x, prod_x, reac_e, prod_e

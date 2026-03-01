@@ -1,6 +1,6 @@
 import torch
-from .GATconv import SelfLoopGATConv
-from .shared import SparseEdgeUpdateLayer
+from .GATconv import SelfLoopGATConv, LocalPESelfLoopGATConv
+from .shared import SparseEdgeUpdateLayer, FiLM
 from ..utils import graph2batch
 
 
@@ -43,13 +43,31 @@ class RAlingLayer(torch.nn.Module):
         return new_prod, new_reac
 
 
+class SymmetricFiLMLayer(torch.nn.Module):
+    def __init__(self, dim):
+        super(SymmetricFiLMLayer, self).__init__()
+        self.film = FiLM(dim, dim)
+
+    def forward(self, x_prod, x_reac, reac_mask):
+        if not torch.all(reac_mask).item():
+            raise ValueError(
+                "fusion_mode='film' requires aligned reactant/product atoms"
+            )
+        if x_prod.shape != x_reac.shape:
+            raise ValueError("FiLM fusion requires matched reactant/product shapes")
+        return self.film(x_prod, x_reac), self.film(x_reac, x_prod)
+
+
 class RAlignGATBlock(torch.nn.Module):
     def __init__(
         self, emb_dim, heads, edge_dim, reac_batch_infos={}, reac_num_keys={},
         prod_batch_infos={}, prod_num_keys={}, dropout=0.1,
-        negative_slope=0.2, edge_update=True, use_lg_lin=True
+        negative_slope=0.2, edge_update=True, use_lg_lin=True,
+        use_local_pe=False, fusion_mode='legacy'
     ):
         super(RAlignGATBlock, self).__init__()
+        if fusion_mode not in ['legacy', 'film']:
+            raise ValueError(f'Invalid fusion mode {fusion_mode}')
         self.reac_batch_adapter = torch.nn.ModuleDict({
             k: torch.nn.MultiheadAttention(
                 embed_dim=emb_dim, num_heads=v['heads'], dropout=dropout,
@@ -79,20 +97,26 @@ class RAlignGATBlock(torch.nn.Module):
             ) for k, v in prod_num_keys.items()
         })
         assert emb_dim % heads == 0, 'emb_dim must be divisible by heads'
-        self.reac_mpnn = SelfLoopGATConv(
+        conv_cls = LocalPESelfLoopGATConv if use_local_pe else SelfLoopGATConv
+        self.reac_mpnn = conv_cls(
             in_channels=emb_dim, out_channels=emb_dim // heads, heads=heads,
             edge_dim=edge_dim, dropout=dropout, negative_slope=negative_slope
         )
-        self.prod_mpnn = SelfLoopGATConv(
+        self.prod_mpnn = conv_cls(
             in_channels=emb_dim, out_channels=emb_dim // heads, heads=heads,
             edge_dim=edge_dim, dropout=dropout, negative_slope=negative_slope
         )
 
         self.edge_update = edge_update
+        self.use_local_pe = use_local_pe
+        self.fusion_mode = fusion_mode
 
-        self.fusion_layer = RAlingLayer(
-            emb_dim, dropout, use_lg_lin=use_lg_lin
-        )
+        if self.fusion_mode == 'legacy':
+            self.fusion_layer = RAlingLayer(
+                emb_dim, dropout, use_lg_lin=use_lg_lin
+            )
+        else:
+            self.fusion_layer = SymmetricFiLMLayer(emb_dim)
 
         self.reac_mpnn_ln = torch.nn.LayerNorm(emb_dim)
         self.prod_mpnn_ln = torch.nn.LayerNorm(emb_dim)
@@ -117,15 +141,28 @@ class RAlignGATBlock(torch.nn.Module):
         self, reac_x, reac_e, reac_eidx, reac_bmask, shared_mask,
         prod_x, prod_e, prod_eidx, prod_bmask,
         reac_batched_condition={}, reac_num_conditions={},
-        prod_batched_condition={}, prod_num_conditions={}
+        prod_batched_condition={}, prod_num_conditions={},
+        reac_pe=None, prod_pe=None
     ):
-        reac_conv = self.reac_mpnn(
-            x=reac_x, edge_attr=reac_e, edge_index=reac_eidx
-        )
+        if self.use_local_pe:
+            if reac_pe is None or prod_pe is None:
+                raise ValueError('local_pe tensors are required when enabled')
+            reac_conv = self.reac_mpnn(
+                x=reac_x, edge_attr=reac_e,
+                edge_index=reac_eidx, pe=reac_pe
+            )
+            prod_conv = self.prod_mpnn(
+                x=prod_x, edge_attr=prod_e,
+                edge_index=prod_eidx, pe=prod_pe
+            )
+        else:
+            reac_conv = self.reac_mpnn(
+                x=reac_x, edge_attr=reac_e, edge_index=reac_eidx
+            )
 
-        prod_conv = self.prod_mpnn(
-            x=prod_x, edge_attr=prod_e, edge_index=prod_eidx
-        )
+            prod_conv = self.prod_mpnn(
+                x=prod_x, edge_attr=prod_e, edge_index=prod_eidx
+            )
 
         prod_x = self.prod_mpnn_ln(self.drop_f(prod_conv) + prod_x)
         reac_x = self.reac_mpnn_ln(self.drop_f(reac_conv) + reac_x)

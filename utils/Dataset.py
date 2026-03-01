@@ -95,6 +95,7 @@ class CNYieldDataset(RAlignDatasetBase):
     
 def graph_col_fn(batch):
     batch_size, edge_idx, node_feat, edge_feat = len(batch), [], [], []
+    local_pe = []
     node_ptr,  node_batch, lstnode, isprod, vols = [0], [], 0, [], []
     max_node, is_rc = max(x['num_nodes'] for x in batch), []
     batch_mask = torch.zeros(batch_size, max_node).bool()
@@ -108,6 +109,8 @@ def graph_col_fn(batch):
         node_feat.append(gp['node_feat'])
         edge_feat.append(gp['edge_feat'])
         edge_idx.append(gp['edge_index'] + lstnode)
+        if 'local_pe' in gp:
+            local_pe.append(gp['local_pe'])
 
         if 'is_rc' in gp:
             is_rc.append(torch.Tensor(gp['is_rc']).bool())
@@ -130,6 +133,9 @@ def graph_col_fn(batch):
         'num_nodes': lstnode,
         'batch_mask': batch_mask
     }
+
+    if len(local_pe) > 0:
+        result['local_pe'] = torch.from_numpy(npcat(local_pe, axis=0))
 
     if len(is_rc) > 0:
         result['is_rc'] = torch.cat(is_rc, dim=0)

@@ -26,6 +26,21 @@ class SparseEdgeUpdateLayer(torch.nn.Module):
         return self.mlp(x)
 
 
+class FiLM(torch.nn.Module):
+    def __init__(self, emb_dim: int, cond_dim: int):
+        super(FiLM, self).__init__()
+        self.film_para = torch.nn.Sequential(
+            torch.nn.Linear(cond_dim, emb_dim << 1),
+            torch.nn.GELU(),
+            torch.nn.Linear(emb_dim << 1, emb_dim << 1)
+        )
+
+    def forward(self, x: torch.Tensor, condx: torch.Tensor) -> torch.Tensor:
+        assert x.shape == condx.shape, "FiLM requires matched feature shapes"
+        gamma, beta = torch.chunk(self.film_para(condx), 2, dim=-1)
+        return (gamma + 1) * x + beta
+
+
 class DotMhAttn(torch.nn.Module):
     def __init__(
         self, Qdim, Kdim, Vdim, Odim, emb_dim,
