@@ -10,9 +10,10 @@ from .graph_utils import smiles2graph, pretrain_s2g
 
 
 class RAlignDatasetBase(torch.utils.data.Dataset):
-    def __init__(self, reactions):
+    def __init__(self, reactions, use_local_pe=False):
         super(RAlignDatasetBase, self).__init__()
         self.reactions = reactions
+        self.use_local_pe = use_local_pe
 
     def __len__(self):
         return len(self.reactions)
@@ -21,8 +22,12 @@ class RAlignDatasetBase(torch.utils.data.Dataset):
         reac, prod = self.reactions[index].strip().split('>>')
         reac_rcs, prod_rcs = get_reaction_core(reac, prod, hop=1)
 
-        reac_mol, reac_amap = smiles2graph(reac, with_amap=True)
-        prod_mol, prod_amap = smiles2graph(prod, with_amap=True)
+        reac_mol, reac_amap = smiles2graph(
+            reac, with_amap=True, with_local_pe=self.use_local_pe
+        )
+        prod_mol, prod_amap = smiles2graph(
+            prod, with_amap=True, with_local_pe=self.use_local_pe
+        )
 
         # align the atoms so that atom with same idx
         # have the same atom map
@@ -263,9 +268,9 @@ def seq_inf_fn(batch):
 class JointDataset(RAlignDatasetBase):
     """继承RAlignDatasetBase的双标签数据集（分类+回归）"""
     def __init__(
-        self, reactions, is_elementary, barrier
+        self, reactions, is_elementary, barrier, use_local_pe=False
     ):
-        super(JointDataset, self).__init__(reactions)
+        super(JointDataset, self).__init__(reactions, use_local_pe=use_local_pe)
         self.cls_label = is_elementary
         self.reg_label = barrier
 

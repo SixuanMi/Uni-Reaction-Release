@@ -38,6 +38,11 @@ if __name__ == '__main__':
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数（需与训练一致）')
     parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
     parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（需与训练一致）')
+    parser.add_argument('--use_local_pe', action='store_true', help='启用local-PE-aware GAT（需与训练一致）')
+    parser.add_argument(
+        '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
+        help='R/P融合方式：legacy为原始对齐融合，film为对称共享FiLM（需与训练一致）'
+    )
     parser.add_argument('--output_path', required=True, type=str, help='输出结果保存路径（.json）')
     parser.add_argument('--checkpoint', required=True, type=str, help='模型权重文件路径（.pth）')
     # 任务相关参数（与训练一致，新增pos_label配置）
@@ -64,7 +69,9 @@ if __name__ == '__main__':
     device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
 
     # 加载数据（仅测试集，复用训练时的数据加载逻辑）
-    _, _, test_set = load_joint_data(args.data_path)
+    _, _, test_set = load_joint_data(
+        args.data_path, use_local_pe=args.use_local_pe
+    )
 
     # 数据加载器（保持与训练一致的collate_fn）
     test_loader = DataLoader(
@@ -107,7 +114,9 @@ if __name__ == '__main__':
         dropout=0.0,  # 预测时禁用dropout
         negative_slope=args.negative_slope,
         update_last_edge=False,
-        use_lg_lin=args.use_lg_lin
+        use_lg_lin=args.use_lg_lin,
+        use_local_pe=args.use_local_pe,
+        fusion_mode=args.fusion_mode
     )
     if args.share_reac_prod_encoder:
         tie_reac_prod_params(encoder)
@@ -150,7 +159,9 @@ if __name__ == '__main__':
             'n_layer': args.n_layer,
             'cls_out_dim': args.cls_out_dim,
             'pos_label': args.pos_label,
-            'batch_size': args.bs
+            'batch_size': args.bs,
+            'use_local_pe': args.use_local_pe,
+            'fusion_mode': args.fusion_mode
         },
         'classification': {
             'true_labels': results['raw']['cls_true'],  # 分类真实标签（列表）

@@ -217,14 +217,14 @@ def load_uspto_condition_inference(data_path, mapper):
     return dataset
 
 
-def load_joint_data(data_path):
+def load_joint_data(data_path, use_local_pe=False):
     """加载训练/验证/测试集的联合数据（分类+回归）"""
-    train_set = load_joint_data_one(data_path, 'train')
-    val_set = load_joint_data_one(data_path, 'val')
-    test_set = load_joint_data_one(data_path, 'test')
+    train_set = load_joint_data_one(data_path, 'train', use_local_pe=use_local_pe)
+    val_set = load_joint_data_one(data_path, 'val', use_local_pe=use_local_pe)
+    test_set = load_joint_data_one(data_path, 'test', use_local_pe=use_local_pe)
     return train_set, val_set, test_set
 
-def load_joint_data_one(data_path, part):
+def load_joint_data_one(data_path, part, use_local_pe=False):
     """加载单个数据集（train/val/test），适配JointDataset"""
     # 读取CSV文件（如train.csv、val.csv、test.csv）
     csv_path = os.path.join(data_path, f'{part}.csv')
@@ -249,7 +249,8 @@ def load_joint_data_one(data_path, part):
     return JointDataset(
         reactions=reactions,
         is_elementary=is_elementary,
-        barrier=barrier
+        barrier=barrier,
+        use_local_pe=use_local_pe
     )
     
 # def load_joint_data_one(data_path, part):

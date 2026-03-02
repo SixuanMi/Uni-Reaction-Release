@@ -117,7 +117,9 @@ if __name__ == '__main__':
         raise ValueError("--auc_delta 不能为负数")
         
     # 加载双任务数据
-    train_set, val_set, test_set = load_joint_data(args.data_path)
+    train_set, val_set, test_set = load_joint_data(
+        args.data_path, use_local_pe=args.use_local_pe
+    )
 
     # 创建日志目录
     log_dir, best_cls_dir, best_reg_dir, best_loss_dir = make_dir(args)

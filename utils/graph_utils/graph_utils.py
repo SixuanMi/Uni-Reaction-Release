@@ -15,7 +15,7 @@ from rdkit.Chem.rdmolfiles import SmilesParserParams
 params = SmilesParserParams()
 params.removeHs = False
 
-def smiles2graph(smiles_string, with_amap=False):
+def smiles2graph(smiles_string, with_amap=False, with_local_pe=False):
     """
     Converts SMILES string to graph Data object
     :input: SMILES string (str)
@@ -40,7 +40,7 @@ def smiles2graph(smiles_string, with_amap=False):
     local_pe_mapper = {}
     for atom in mol.GetAtoms():
         atom_features_list.append(atom_to_feature_vector(atom))
-        if atom.GetChiralTag() in [
+        if with_local_pe and atom.GetChiralTag() in [
             ChiralType.CHI_TETRAHEDRAL_CCW,
             ChiralType.CHI_TETRAHEDRAL_CW
         ]:
@@ -56,7 +56,7 @@ def smiles2graph(smiles_string, with_amap=False):
     if len(mol.GetBonds()) > 0:  # mol has bonds
         edges_list = []
         edge_features_list = []
-        local_pe_list = []
+        local_pe_list = [] if with_local_pe else None
         for bond in mol.GetBonds():
             i = bond.GetBeginAtomIdx()
             j = bond.GetEndAtomIdx()
@@ -66,10 +66,12 @@ def smiles2graph(smiles_string, with_amap=False):
             # add edges in both directions
             edges_list.append((i, j))
             edge_features_list.append(edge_feature)
-            local_pe_list.append(local_pe_mapper.get((i, j), 4))
+            if with_local_pe:
+                local_pe_list.append(local_pe_mapper.get((i, j), 4))
             edges_list.append((j, i))
             edge_features_list.append(edge_feature)
-            local_pe_list.append(local_pe_mapper.get((j, i), 4))
+            if with_local_pe:
+                local_pe_list.append(local_pe_mapper.get((j, i), 4))
 
         # data.edge_index: Graph connectivity
         # in COO format with shape [2, num_edges]
@@ -78,17 +80,20 @@ def smiles2graph(smiles_string, with_amap=False):
         # data.edge_attr: Edge feature matrix with
         # shape [num_edges, num_edge_features]
         edge_attr = np.array(edge_features_list, dtype=np.int64)
-        local_pe = np.array(local_pe_list, dtype=np.int64)
+        if with_local_pe:
+            local_pe = np.array(local_pe_list, dtype=np.int64)
 
     else:   # mol has no bonds
         edge_index = np.empty((2, 0), dtype=np.int64)
         edge_attr = np.empty((0, num_bond_features), dtype=np.int64)
-        local_pe = np.empty((0, ), dtype=np.int64)
+        if with_local_pe:
+            local_pe = np.empty((0, ), dtype=np.int64)
 
     graph = dict()
     graph['edge_index'] = edge_index
     graph['edge_feat'] = edge_attr
-    graph['local_pe'] = local_pe
+    if with_local_pe:
+        graph['local_pe'] = local_pe
     graph['node_feat'] = x
     graph['num_nodes'] = len(x)
 
