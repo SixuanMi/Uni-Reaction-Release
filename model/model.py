@@ -463,6 +463,15 @@ class JointModel(torch.nn.Module):
         memory_mask = torch.logical_not(torch.cat([reac_graph.batch_mask, prod_graph.batch_mask], dim=1))
         
         pool_key = self.pool_keys.repeat(memory.shape[0], 1, 1)
+        if cross_mask is not None and cross_mask.ndim == 4:
+            query_len = pool_key.shape[1]
+            if cross_mask.shape[1] == 1 and query_len > 1:
+                cross_mask = cross_mask.expand(-1, query_len, -1, -1)
+            elif cross_mask.shape[1] != query_len:
+                raise ValueError(
+                    f'cross_mask query dim {cross_mask.shape[1]} does not match '
+                    f'pool query dim {query_len}'
+                )
         pooled_results, _ = self.pooler(
             query=pool_key, key=memory, value=memory,
             key_padding_mask=memory_mask, attn_mask=cross_mask
