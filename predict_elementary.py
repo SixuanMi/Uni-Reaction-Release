@@ -21,6 +21,12 @@ RDLogger.DisableLog('rdApp.*')
 def tie_reac_prod_params(encoder):
     for layer in encoder.layers:
         layer.prod_mpnn = layer.reac_mpnn
+        layer.prod_mpnn_ln = layer.reac_mpnn_ln
+        layer.prod_fusion_ln = layer.reac_fusion_ln
+        if hasattr(layer, 'reac_ue') and hasattr(layer, 'prod_ue'):
+            layer.prod_ue = layer.reac_ue
+        if hasattr(layer, 'reac_edge_ln') and hasattr(layer, 'prod_edge_ln'):
+            layer.prod_edge_ln = layer.reac_edge_ln
 
 
 if __name__ == '__main__':
