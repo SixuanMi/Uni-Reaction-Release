@@ -437,8 +437,8 @@ class JointModel(torch.nn.Module):
             torch.nn.Softplus()  # 保证能垒输出非负，训练/评估语义一致
         )
         
-        # 分别为反应物和产物学习一个池化query，再做任务特征组合
-        self.pool_keys = torch.nn.Parameter(torch.randn(1, 2, dim))
+        # 反应物/产物共享同一个池化query，减少额外方向偏置
+        self.pool_keys = torch.nn.Parameter(torch.randn(1, 1, dim))
         self.pooler = DotMhAttn(
             Qdim=dim, Kdim=dim, Vdim=dim, Odim=dim,
             emb_dim=dim, num_heads=heads, dropout=dropout
@@ -462,8 +462,9 @@ class JointModel(torch.nn.Module):
         reac_mask = torch.logical_not(reac_graph.batch_mask)
         prod_mask = torch.logical_not(prod_graph.batch_mask)
 
-        reac_query = self.pool_keys[:, :1].repeat(x_reac.shape[0], 1, 1)
-        prod_query = self.pool_keys[:, 1:].repeat(x_prod.shape[0], 1, 1)
+        shared_query = self.pool_keys.repeat(x_reac.shape[0], 1, 1)
+        reac_query = shared_query
+        prod_query = shared_query
         reac_cross_mask, prod_cross_mask = None, None
 
         if cross_mask is not None and cross_mask.ndim == 4:
