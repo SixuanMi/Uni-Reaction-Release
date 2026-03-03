@@ -433,11 +433,12 @@ class JointModel(torch.nn.Module):
             torch.nn.Dropout(dropout),
             torch.nn.Linear(dim, dim),
             torch.nn.GELU(),
-            torch.nn.Linear(dim, 1)  # 能垒1个值
+            torch.nn.Linear(dim, 1),
+            torch.nn.Softplus()  # 保证能垒输出非负，训练/评估语义一致
         )
         
-        # 共享池化层（与原有模型保持一致）
-        self.pool_keys = torch.nn.Parameter(torch.randn(1, 1, dim))
+        # 共享池化层：两个可学习query分别服务分类和回归
+        self.pool_keys = torch.nn.Parameter(torch.randn(1, 2, dim))
         self.pooler = DotMhAttn(
             Qdim=dim, Kdim=dim, Vdim=dim, Odim=dim,
             emb_dim=dim, num_heads=heads, dropout=dropout
@@ -466,9 +467,11 @@ class JointModel(torch.nn.Module):
             query=pool_key, key=memory, value=memory,
             key_padding_mask=memory_mask, attn_mask=cross_mask
         )
-        reaction_emb = self.xln(pooled_results.squeeze(dim=1))
+        pooled_results = self.xln(pooled_results)
+        cls_emb = pooled_results[:, 0]
+        reg_emb = pooled_results[:, 1]
         
         # 双任务输出
-        cls_out = self.cls_head(reaction_emb)  # 分类输出
-        reg_out = self.reg_head(reaction_emb)  # 回归输出
+        cls_out = self.cls_head(cls_emb)  # 分类输出
+        reg_out = self.reg_head(reg_emb)  # 回归输出
         return cls_out, reg_out

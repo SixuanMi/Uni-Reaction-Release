@@ -519,7 +519,7 @@ def eval_joint(
             cls_true_batch = cls_label.cpu().numpy()
             
             # 回归结果：保留NaN
-            reg_pred_batch = torch.clamp(reg_out, 0).view(-1).cpu().numpy()
+            reg_pred_batch = reg_out.view(-1).cpu().numpy()
             reg_label_batch = reg_label.cpu().numpy()
             reg_nan_mask = ~np.isfinite(reg_label_batch)
             reg_pred_batch[reg_nan_mask] = np.nan

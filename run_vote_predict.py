@@ -68,7 +68,9 @@ def build_model(args, dropout: float):
         dropout=dropout,
         negative_slope=args.negative_slope,
         update_last_edge=False,
-        use_lg_lin=args.use_lg_lin
+        use_lg_lin=args.use_lg_lin,
+        use_local_pe=args.use_local_pe,
+        fusion_mode=args.fusion_mode
     )
     if args.share_reac_prod_encoder:
         tie_reac_prod_params(encoder)
@@ -121,6 +123,11 @@ def main():
     parser.add_argument('--cls_out_dim', type=int, default=2)
     parser.add_argument('--local_heads', type=int, default=4)
     parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
+    parser.add_argument('--use_local_pe', action='store_true', help='启用local-PE-aware GAT（需与训练一致）')
+    parser.add_argument(
+        '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
+        help='R/P融合方式（需与训练一致）'
+    )
     parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（需与训练一致）')
     parser.add_argument('--use_condition', action='store_true')
     parser.add_argument('--condition_config', type=str, default='')
@@ -153,7 +160,9 @@ def main():
     # 加载测试集
     if not data_path:
         raise ValueError("请提供 --data_path 或 --main_dir")
-    test_set = load_joint_data_one(data_path, 'test')
+    test_set = load_joint_data_one(
+        data_path, 'test', use_local_pe=args.use_local_pe
+    )
     test_loader = DataLoader(
         test_set, batch_size=args.bs, shuffle=False,
         collate_fn=joint_colfn, num_workers=args.num_worker, pin_memory=True

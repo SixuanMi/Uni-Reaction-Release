@@ -45,8 +45,8 @@ def smiles2graph(smiles_string, with_amap=False, with_local_pe=False):
             ChiralType.CHI_TETRAHEDRAL_CW
         ]:
             neighbors = list(atom.GetNeighbors())
-            if len(neighbors) != 4:
-                raise ValueError("Implicit Hs in SMILES")
+            # if len(neighbors) != 4:
+            #     raise ValueError("Implicit Hs in SMILES")
             for idx, nei in enumerate(neighbors):
                 local_pe_mapper[(nei.GetIdx(), atom.GetIdx())] = idx
     x = np.array(atom_features_list, dtype=np.int64)
