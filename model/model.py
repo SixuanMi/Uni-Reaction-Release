@@ -415,7 +415,7 @@ class JointModel(torch.nn.Module):
         
         # 分类任务头（例如：反应类型分类）
         self.cls_head = torch.nn.Sequential(
-            torch.nn.Linear(dim, dim),
+            torch.nn.Linear(dim * 2, dim),
             torch.nn.GELU(),
             torch.nn.Dropout(dropout),
             torch.nn.Linear(dim, cls_out_dim)  # 2类分类
@@ -423,7 +423,7 @@ class JointModel(torch.nn.Module):
         
         # 回归任务头（例如：产率预测）
         self.reg_head = torch.nn.Sequential(
-            torch.nn.Linear(dim, dim),
+            torch.nn.Linear(dim * 3, dim),
             torch.nn.GELU(),
             torch.nn.Dropout(dropout),
             torch.nn.Linear(dim, dim),
@@ -437,7 +437,7 @@ class JointModel(torch.nn.Module):
             torch.nn.Softplus()  # 保证能垒输出非负，训练/评估语义一致
         )
         
-        # 共享池化层：两个可学习query分别服务分类和回归
+        # 分别为反应物和产物学习一个池化query，再做任务特征组合
         self.pool_keys = torch.nn.Parameter(torch.randn(1, 2, dim))
         self.pooler = DotMhAttn(
             Qdim=dim, Kdim=dim, Vdim=dim, Odim=dim,
@@ -456,31 +456,43 @@ class JointModel(torch.nn.Module):
             prod_graph=prod_graph, prod_batched_condition=condition_dict
         )
         
-        # 池化得到反应级特征
+        # 分别池化反应物和产物，保留方向信息供后续组合
         x_reac = graph2batch(x_reac, reac_graph.batch_mask)
         x_prod = graph2batch(x_prod, prod_graph.batch_mask)
-        memory = torch.cat([x_reac, x_prod], dim=1)
-        memory_mask = torch.logical_not(torch.cat([reac_graph.batch_mask, prod_graph.batch_mask], dim=1))
-        
-        pool_key = self.pool_keys.repeat(memory.shape[0], 1, 1)
+        reac_mask = torch.logical_not(reac_graph.batch_mask)
+        prod_mask = torch.logical_not(prod_graph.batch_mask)
+
+        reac_query = self.pool_keys[:, :1].repeat(x_reac.shape[0], 1, 1)
+        prod_query = self.pool_keys[:, 1:].repeat(x_prod.shape[0], 1, 1)
+        reac_cross_mask, prod_cross_mask = None, None
+
         if cross_mask is not None and cross_mask.ndim == 4:
-            query_len = pool_key.shape[1]
-            if cross_mask.shape[1] == 1 and query_len > 1:
-                cross_mask = cross_mask.expand(-1, query_len, -1, -1)
-            elif cross_mask.shape[1] != query_len:
+            mask_source = cross_mask[:, :1] if cross_mask.shape[1] != 1 else cross_mask
+            total_len = x_reac.shape[1] + x_prod.shape[1]
+            if mask_source.shape[2] != total_len:
                 raise ValueError(
-                    f'cross_mask query dim {cross_mask.shape[1]} does not match '
-                    f'pool query dim {query_len}'
+                    f'cross_mask key dim {mask_source.shape[2]} does not match '
+                    f'combined sequence length {total_len}'
                 )
-        pooled_results, _ = self.pooler(
-            query=pool_key, key=memory, value=memory,
-            key_padding_mask=memory_mask, attn_mask=cross_mask
+            reac_cross_mask = mask_source[:, :, :x_reac.shape[1], :]
+            prod_cross_mask = mask_source[:, :, x_reac.shape[1]:, :]
+
+        r_pool, _ = self.pooler(
+            query=reac_query, key=x_reac, value=x_reac,
+            key_padding_mask=reac_mask, attn_mask=reac_cross_mask
         )
-        pooled_results = self.xln(pooled_results)
-        cls_emb = pooled_results[:, 0]
-        reg_emb = pooled_results[:, 1]
+        p_pool, _ = self.pooler(
+            query=prod_query, key=x_prod, value=x_prod,
+            key_padding_mask=prod_mask, attn_mask=prod_cross_mask
+        )
+        r_pool = self.xln(r_pool.squeeze(dim=1))
+        p_pool = self.xln(p_pool.squeeze(dim=1))
+        d_pool = p_pool - r_pool
+
+        cls_feat = torch.cat([r_pool + p_pool, torch.abs(d_pool)], dim=-1)
+        reg_feat = torch.cat([r_pool, p_pool, d_pool], dim=-1)
         
         # 双任务输出
-        cls_out = self.cls_head(cls_emb)  # 分类输出
-        reg_out = self.reg_head(reg_emb)  # 回归输出
+        cls_out = self.cls_head(cls_feat)  # 分类输出：交换R/P保持不变
+        reg_out = self.reg_head(reg_feat)  # 回归输出：显式保留方向信息
         return cls_out, reg_out
