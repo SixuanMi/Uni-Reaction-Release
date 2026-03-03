@@ -18,6 +18,33 @@ class RAlignDatasetBase(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.reactions)
 
+    @staticmethod
+    def _reorder_graph_by_am(graph, amap_to_idx, ordered_ams):
+        if len(ordered_ams) != graph['num_nodes']:
+            raise ValueError(
+                'The reordered atom-map list must match the number of graph nodes'
+            )
+
+        am_to_rank = {am: idx for idx, am in enumerate(ordered_ams)}
+        old_to_new = {
+            old_idx: am_to_rank[am]
+            for am, old_idx in amap_to_idx.items()
+        }
+
+        new_node_feat = np.zeros_like(graph['node_feat'])
+        for am, old_idx in amap_to_idx.items():
+            new_node_feat[am_to_rank[am]] = graph['node_feat'][old_idx]
+
+        edge_index = graph['edge_index']
+        new_edge_index = np.array([
+            [old_to_new[idx] for idx in edge_index[0]],
+            [old_to_new[idx] for idx in edge_index[1]]
+        ], dtype=np.int64)
+
+        graph['node_feat'] = new_node_feat
+        graph['edge_index'] = new_edge_index
+        return am_to_rank
+
     def get_aligned_graphs(self, index):
         reac, prod = self.reactions[index].strip().split('>>')
         reac_rcs, prod_rcs = get_reaction_core(reac, prod, hop=1)
@@ -29,45 +56,30 @@ class RAlignDatasetBase(torch.utils.data.Dataset):
             prod, with_amap=True, with_local_pe=self.use_local_pe
         )
 
-        # align the atoms so that atom with same idx
-        # have the same atom map
-        am2rank = {}
-        for am, arank in prod_amap.items():
-            am2rank[am] = arank
+        shared_ams = sorted(set(reac_amap.keys()) & set(prod_amap.keys()))
+        reac_only_ams = sorted(set(reac_amap.keys()) - set(prod_amap.keys()))
+        prod_only_ams = sorted(set(prod_amap.keys()) - set(reac_amap.keys()))
 
-        for am in reac_amap:
-            if am not in am2rank:
-                am2rank[am] = len(am2rank)
+        # Use a role-agnostic atom-map ordering for shared atoms.
+        # In fully aligned data, both sides become the same sorted atom-map order.
+        reac_order = shared_ams + reac_only_ams
+        prod_order = shared_ams + prod_only_ams
 
-        prod_mol['is_rc'] = [False] * len(prod_amap)
-        reac_mol['is_rc'] = [False] * len(reac_amap)
+        self._reorder_graph_by_am(reac_mol, reac_amap, reac_order)
+        prod_am2rank = self._reorder_graph_by_am(
+            prod_mol, prod_amap, prod_order
+        )
 
-        for k in reac_rcs:
-            reac_mol['is_rc'][am2rank[k]] = True
+        reac_mol['is_rc'] = np.array(
+            [am in reac_rcs for am in reac_order], dtype=bool
+        )
+        prod_mol['is_rc'] = np.array(
+            [am in prod_rcs for am in prod_order], dtype=bool
+        )
 
-        for k in prod_rcs:
-            prod_mol['is_rc'][prod_amap[k]] = True
-
-        remap = {v: am2rank[x] for x, v in reac_amap.items()}
-        reac_x = np.zeros_like(reac_mol['node_feat'])
-        reac_e = reac_mol['edge_index'].tolist()
-
-        for k, v in remap.items():
-            reac_x[v] = reac_mol['node_feat'][k]
-
-        reac_e = [
-            [remap[x] for x in reac_e[0]],
-            [remap[x] for x in reac_e[1]]
-        ]
-
-        reac_mol['node_feat'] = reac_x
-        reac_mol['edge_index'] = np.array(reac_e, dtype=np.int64)
-
-        isprod = [False] * reac_mol['num_nodes']
-        for x in prod_amap:
-            isprod[am2rank[x]] = True
-
-        reac_mol['isprod'] = np.array(isprod, dtype=bool)
+        reac_mol['isprod'] = np.array(
+            [am in prod_am2rank for am in reac_order], dtype=bool
+        )
         return reac_mol, prod_mol
 
     def __getitem__(self, index):
