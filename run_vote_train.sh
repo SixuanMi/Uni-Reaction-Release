@@ -101,3 +101,5 @@ if (( fail != 0 )); then
 fi
 
 echo "[INFO] 全部fold训练完成"
+
+# PARALLEL_JOBS=5 GPU_IDS=0,1,2,3,4 ./run_vote_train.sh --data_path ../dataset/ready_v6_t1xTruexTB_FalsexTB_stereo_cycle0/ --dim 192 --n_layer 5 --lr 2e-4 --num_worker 32 --share_reac_prod_encoder --epoch 200 --fusion_mode film
