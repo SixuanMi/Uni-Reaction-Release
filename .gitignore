@@ -2,3 +2,8 @@
 __pycache__/
 co-diff/
 smoketest/
+active_select.py
+analyze_swap_sensitivity.py
+check_train_log.ipynb
+environment.yml
+vote_infer_unlabeled.py

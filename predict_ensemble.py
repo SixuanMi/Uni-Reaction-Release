@@ -27,6 +27,8 @@ def collect_model_paths(model_paths: List[str], model_root: str) -> List[str]:
             paths = glob.glob(os.path.join(model_root, "**", "best_model.pt"), recursive=True)
         return sorted(paths)
     raise ValueError("未找到模型路径，请提供 --model_paths 或 --main_dir（默认搜索 logs 子目录）")
+
+
 def majority_vote_cls(cls_preds: np.ndarray) -> np.ndarray:
     # cls_preds: [n_models, n_samples]
     out = []
@@ -40,11 +42,32 @@ def mean_reg(all_reg: np.ndarray) -> np.ndarray:
     # all_reg: [n_models, n_samples]
     if all_reg.size == 0 or all_reg.shape[0] == 0:
         return np.array([])
-    with np.errstate(all='ignore'):
-        out = np.nanmean(all_reg, axis=0)
-    # 如果某个样本所有模型均为 NaN，显式设为 NaN，避免警告/inf
-    all_nan = np.all(~np.isfinite(all_reg), axis=0)
-    out[all_nan] = np.nan
+    valid_mask = np.isfinite(all_reg)
+    valid_count = valid_mask.sum(axis=0)
+    out = np.full(all_reg.shape[1], np.nan, dtype=np.float64)
+    has_valid = valid_count > 0
+    if np.any(has_valid):
+        valid_values = np.where(valid_mask, all_reg, 0.0)
+        out[has_valid] = valid_values[:, has_valid].sum(axis=0) / valid_count[has_valid]
+    return out
+
+
+def std_reg(all_reg: np.ndarray, mean_reg_values: np.ndarray) -> np.ndarray:
+    # all_reg: [n_models, n_samples]
+    if all_reg.size == 0 or all_reg.shape[0] == 0:
+        return np.array([])
+    valid_mask = np.isfinite(all_reg)
+    valid_count = valid_mask.sum(axis=0)
+    out = np.full(all_reg.shape[1], np.nan, dtype=np.float64)
+    has_valid = valid_count > 0
+    if np.any(has_valid):
+        centered = np.where(
+            valid_mask[:, has_valid],
+            all_reg[:, has_valid] - mean_reg_values[has_valid],
+            0.0
+        )
+        var = (centered ** 2).sum(axis=0) / valid_count[has_valid]
+        out[has_valid] = np.sqrt(var)
     return out
 
 
@@ -151,7 +174,7 @@ def main():
     mean_reg_pred = mean_reg(reg_preds)
 
     mean_prob_per_sample = np.nanmean(cls_scores, axis=0)  # [n_samples]
-    reg_std_per_sample = np.nanstd(reg_preds, axis=0)
+    reg_std_per_sample = std_reg(reg_preds, mean_reg_pred)
 
     # 汇总
     out = {
