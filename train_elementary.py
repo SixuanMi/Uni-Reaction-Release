@@ -5,7 +5,7 @@ import argparse
 import json
 import numpy as np
 
-from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from utils.data_utils import load_joint_data, fix_seed, count_parameters
@@ -14,8 +14,7 @@ from utils.Dataset import joint_colfn  # 双标签collate函数
 
 from model import (
     JointModel,  # 联合模型
-    RAlignEncoder,
-    build_cn_condition_encoder_with_eval  # 保留条件编码器构建函数
+    RAlignEncoder
 )
 
 from rdkit import RDLogger
@@ -28,10 +27,8 @@ def make_dir(args):
     if not os.path.exists(detail_dir):
         os.makedirs(detail_dir)
     log_dir = os.path.join(detail_dir, 'log.json')
-    best_cls_dir = os.path.join(detail_dir, 'best_cls.pth')  # 最佳分类模型
-    best_reg_dir = os.path.join(detail_dir, 'best_reg.pth')  # 最佳回归模型
-    best_loss_dir = os.path.join(detail_dir, 'best_loss.pth')  # 最佳loss模型
-    return log_dir, best_cls_dir, best_reg_dir, best_loss_dir
+    best_model_dir = os.path.join(detail_dir, 'best_model.pth')
+    return log_dir, best_model_dir
 
 
 def tie_reac_prod_params(encoder):
@@ -68,35 +65,33 @@ if __name__ == '__main__':
     parser.add_argument('--step_start', type=int, default=20, help='学习率衰减起始轮数')
     parser.add_argument('--seed', type=int, default=2025, help='随机种子（保证可复现）')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数')
-    parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（默认关闭，移除无用参数）')
-    parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（默认关闭）')
-    parser.add_argument('--use_local_pe', action='store_true', help='启用local-PE-aware GAT（默认关闭，保留旧路径）')
+    parser.add_argument(
+        '--share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_true',
+        default=True,
+        help='反应物/产物编码层共享参数（默认开启）'
+    )
+    parser.add_argument(
+        '--no_share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_false',
+        help='关闭反应物/产物编码层共享参数'
+    )
     parser.add_argument(
         '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
         help='R/P融合方式：legacy为原始对齐融合，film为对称共享FiLM'
     )
-    # 联合训练特有参数# 联合训练特有参数中新增
-    parser.add_argument('--loss_weight_mode', type=str, default='fixed', choices=['fixed', 'dynamic'], help='损失权重模式（fixed：固定λ；dynamic：动态调整）')
-    parser.add_argument('--lambda_init', type=float, default=5e-3, help='初始λ（fixed模式下为固定值，dynamic模式下为初始值）')
-    parser.add_argument('--alpha', type=float, default=0.1, help='动态权重调整系数（值越小，调整越平滑）')
-    parser.add_argument('--cls_out_dim', type=int, default=2, help='分类任务输出维度（如2分类）')
+    parser.add_argument('--lambda_reg', type=float, default=5e-3, help='回归损失权重 λ')
     parser.add_argument(
         '--early_stop_patience',
         type=int,
         default=None,
         help='早停轮数（默认lrpatience*2，仅在学习率到达最小值后开始计数）'
     )
-    # 条件编码器相关参数（保留，默认不启用）
-    parser.add_argument('--use_condition', action='store_true', help='是否启用条件编码器（默认不启用）')
-    parser.add_argument('--condition_config', type=str, default='', help='条件编码器配置文件路径（use_condition=True时需提供）')
-    parser.add_argument('--condition_both', action='store_true', help='条件是否同时作用于反应物和产物（use_condition=True时生效）')
 
     args = parser.parse_args()
     print(args)
-
-    # 校验参数：启用条件编码器时必须提供配置文件
-    if args.use_condition and not args.condition_config:
-        raise ValueError("启用条件编码器时，必须通过--condition_config指定配置文件路径")
 
     # 固定随机种子
     fix_seed(args.seed)
@@ -104,11 +99,7 @@ if __name__ == '__main__':
     # 设备配置
     device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
 
-    # 初始化λ
-    if args.loss_weight_mode == 'fixed':
-        current_lambda = args.lambda_init
-    else:
-        current_lambda = args.lambda_init  # 动态模式下的初始值
+    current_lambda = args.lambda_reg
 
     # 早停参数：默认等于学习率衰减耐心轮数的2倍
     if args.early_stop_patience is None:
@@ -123,12 +114,10 @@ if __name__ == '__main__':
         raise ValueError("--auc_delta 不能为负数")
         
     # 加载双任务数据
-    train_set, val_set, test_set = load_joint_data(
-        args.data_path, use_local_pe=args.use_local_pe
-    )
+    train_set, val_set, test_set = load_joint_data(args.data_path)
 
     # 创建日志目录
-    log_dir, best_cls_dir, best_reg_dir, best_loss_dir = make_dir(args)
+    log_dir, best_model_dir = make_dir(args)
 
     # 数据加载器（使用双标签collate函数）
     train_loader = DataLoader(
@@ -147,58 +136,26 @@ if __name__ == '__main__':
         pin_memory=True
     )
 
-    # 构建条件信息（根据是否启用条件编码器动态处理）
-    if args.use_condition:
-        # 启用条件编码器：加载配置并构建条件信息
-        with open(args.condition_config) as Fin:
-            condition_config = json.load(Fin)
-        # 构建条件信息（与原逻辑一致）
-        if condition_config['mode'] == 'mix-all':
-            condition_infos = {'mixed': {'dim': condition_config['dim'], 'heads': args.heads}}
-        elif condition_config['mode'] == 'mix-catalyst-ligand':
-            condition_infos = {k: {'dim': condition_config['dim'], 'heads': args.heads}
-                              for k in ['additive', 'base', 'catalyst and ligand']}
-        else:
-            condition_infos = {k: {'dim': condition_config['dim'], 'heads': args.heads}
-                              for k in ['ligand', 'base', 'additive', 'catalyst']}
-        # 构建条件编码器
-        condition_encoder, eval_layers = build_cn_condition_encoder_with_eval(
-            config=condition_config, dropout=args.dropout
-        )
-    else:
-        # 不启用条件编码器：条件信息为空，编码器设为None
-        condition_infos = {}
-        condition_encoder = None
-
-    # 构建基础编码器（根据是否启用条件编码器动态传入参数）
+    # 构建基础编码器
     encoder = RAlignEncoder(
         n_layer=args.n_layer,
         emb_dim=args.dim,
         edge_dim=args.dim,
         heads=args.heads,
-        # 条件相关参数：启用时传入实际信息，否则为空
-        reac_batch_infos=condition_infos if args.use_condition else {},
-        prod_batch_infos=condition_infos if (args.use_condition and args.condition_both) else {},
-        prod_num_keys={},
-        reac_num_keys={},
         dropout=args.dropout,
         negative_slope=args.negative_slope,
         update_last_edge=False,
-        use_lg_lin=args.use_lg_lin,
-        use_local_pe=args.use_local_pe,
         fusion_mode=args.fusion_mode
     )
     if args.share_reac_prod_encoder:
         tie_reac_prod_params(encoder)
 
-    # 初始化联合模型（条件编码器可选传入）
+    # 初始化联合模型
     model = JointModel(
         encoder=encoder,
-        condition_encoder=condition_encoder,  # 不启用时为None
         dim=args.dim,
         dropout=args.dropout,
-        heads=args.heads,
-        cls_out_dim=args.cls_out_dim
+        heads=args.heads
     ).to(device)
 
     # 统计模型参数
@@ -207,7 +164,6 @@ if __name__ == '__main__':
 
     # 优化器和学习率调度器
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    # lr_sher = ExponentialLR(optimizer, gamma=args.lrgamma)
     lr_sher = ReduceLROnPlateau(
         optimizer,
         mode='max',             # 匹配PR-AUC：越大越好
@@ -257,45 +213,27 @@ if __name__ == '__main__':
         current_lr = optimizer.param_groups[0]['lr']  # ReduceLROnPlateau用这个获取LR
         print(f'[学习率状态] 当前学习率：{current_lr:.6f}')
         
-        # 动态权重调整（根据上一轮的损失比例）
-        if args.loss_weight_mode == 'dynamic' and ep > 0:
-            # 原理：让λ随两个损失的比例自适应调整，使两者贡献相对平衡
-            # 公式：λ_new = λ_old * (cls_loss / reg_loss) ^ alpha
-            # 当reg_loss过大时，λ减小；当cls_loss过大时，λ增大
-            cls_loss_prev = log_info['train_cls_loss'][-1]  # 上一轮分类损失
-            reg_loss_prev = log_info['train_reg_loss'][-1]  # 上一轮回归损失（原始）
-            if reg_loss_prev > 1e-6:  # 避免除零
-                current_lambda = current_lambda * (cls_loss_prev / reg_loss_prev) ** args.alpha
-                # 限制λ的范围，避免过大或过小
-                current_lambda = max(5e-3, min(current_lambda, 10.0))
-            print(f'[动态权重更新] 当前λ: {current_lambda:.4f}')
-
-        # 联合训练（根据是否启用条件编码器决定是否传入has_reag）
+        # 联合训练
         # 接收总损失、分类损失、回归损失
         train_total_loss, train_cls_loss, train_reg_loss = train_joint(
             train_loader, model, optimizer, device,
             lambda_reg=current_lambda,
             warmup=(ep < args.warmup),
             total_heads=args.heads,
-            local_heads=args.local_heads,
-            has_reag=args.use_condition  # 启用条件编码器时为True，否则为False
+            local_heads=args.local_heads
         )
-        # 联合评估（同理）
+        # 联合评估
         val_metric = eval_joint(
             val_loader, model, device,
-            lambda_reg=current_lambda, # 传递训练时的lambda（fixed/dynamic）
+            lambda_reg=current_lambda,
             total_heads=args.heads,
             local_heads=args.local_heads,
-            has_reag=args.use_condition,
-            num_classes=args.cls_out_dim,
             pos_label=1
         )
         test_metric = eval_joint(
             test_loader, model, device,
             total_heads=args.heads,
             local_heads=args.local_heads,
-            has_reag=args.use_condition,
-            num_classes=args.cls_out_dim,
             pos_label=1
         )
 
@@ -371,10 +309,7 @@ if __name__ == '__main__':
             if cur_pr_auc > best_cls_pr_auc + args.auc_delta:
                 best_cls_pr_auc = cur_pr_auc
                 best_pr_auc_ep = ep + 1
-                # best_loss.pth 继续保留，兼容现有推理脚本
-                torch.save(model.state_dict(), best_loss_dir)
-                # 同时额外保存一份 best_cls.pth，语义更清晰
-                torch.save(model.state_dict(), best_cls_dir)
+                torch.save(model.state_dict(), best_model_dir)
                 print(f'[最佳模型更新] 轮次: {best_pr_auc_ep}, 验证PR-AUC: {best_cls_pr_auc:.4f}')
         else:
             print('[最佳模型更新] 当前验证PR-AUC为NaN，跳过本轮AUC最优模型更新')

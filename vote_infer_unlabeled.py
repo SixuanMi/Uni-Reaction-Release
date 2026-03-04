@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 from utils.data_utils import fix_seed
 from utils.Dataset import RAlignDatasetBase, graph_col_fn
-from model import JointModel, RAlignEncoder, build_cn_condition_encoder_with_eval
+from model import JointModel, RAlignEncoder
 
 from rdkit import RDLogger
 
@@ -21,6 +21,12 @@ RDLogger.DisableLog('rdApp.*')
 def tie_reac_prod_params(encoder):
     for layer in encoder.layers:
         layer.prod_mpnn = layer.reac_mpnn
+        layer.prod_mpnn_ln = layer.reac_mpnn_ln
+        layer.prod_fusion_ln = layer.reac_fusion_ln
+        if hasattr(layer, 'reac_ue') and hasattr(layer, 'prod_ue'):
+            layer.prod_ue = layer.reac_ue
+        if hasattr(layer, 'reac_edge_ln') and hasattr(layer, 'prod_edge_ln'):
+            layer.prod_edge_ln = layer.reac_edge_ln
 
 
 class SimpleRxnDataset(RAlignDatasetBase):
@@ -40,52 +46,24 @@ def simple_collate(batch):
 
 
 def build_model(args, dropout: float):
-    if args.use_condition:
-        with open(args.condition_config) as fin:
-            condition_config = json.load(fin)
-        if condition_config['mode'] == 'mix-all':
-            condition_infos = {'mixed': {'dim': condition_config['dim'], 'heads': args.heads}}
-        elif condition_config['mode'] == 'mix-catalyst-ligand':
-            condition_infos = {
-                k: {'dim': condition_config['dim'], 'heads': args.heads}
-                for k in ['additive', 'base', 'catalyst and ligand']
-            }
-        else:
-            condition_infos = {
-                k: {'dim': condition_config['dim'], 'heads': args.heads}
-                for k in ['ligand', 'base', 'additive', 'catalyst']
-            }
-        condition_encoder, _ = build_cn_condition_encoder_with_eval(
-            config=condition_config, dropout=dropout
-        )
-    else:
-        condition_infos = {}
-        condition_encoder = None
-
     encoder = RAlignEncoder(
         n_layer=args.n_layer,
         emb_dim=args.dim,
         edge_dim=args.dim,
         heads=args.heads,
-        reac_batch_infos=condition_infos if args.use_condition else {},
-        prod_batch_infos=condition_infos if (args.use_condition and args.condition_both) else {},
-        prod_num_keys={},
-        reac_num_keys={},
         dropout=dropout,
         negative_slope=args.negative_slope,
         update_last_edge=False,
-        use_lg_lin=args.use_lg_lin
+        fusion_mode=args.fusion_mode
     )
     if args.share_reac_prod_encoder:
         tie_reac_prod_params(encoder)
 
     return JointModel(
         encoder=encoder,
-        condition_encoder=condition_encoder,
         dim=args.dim,
         dropout=dropout,
-        heads=args.heads,
-        cls_out_dim=args.cls_out_dim
+        heads=args.heads
     )
 
 
@@ -94,7 +72,7 @@ def collect_model_paths(model_paths: List[str], main_dir: str) -> List[str]:
         return model_paths
     if main_dir:
         logs_dir = os.path.join(main_dir, "logs") if os.path.isdir(os.path.join(main_dir, "logs")) else main_dir
-        paths = glob.glob(os.path.join(logs_dir, "**", "best_loss.pth"), recursive=True)
+        paths = glob.glob(os.path.join(logs_dir, "**", "best_model.pth"), recursive=True)
         if not paths:
             paths = glob.glob(os.path.join(logs_dir, "**", "best_model.pt"), recursive=True)
         return sorted(paths)
@@ -190,18 +168,26 @@ def main():
     parser.add_argument('--num_worker', type=int, default=8)
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--seed', type=int, default=2025)
-    parser.add_argument('--cls_out_dim', type=int, default=2)
     parser.add_argument('--local_heads', type=int, default=4)
-    parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
-    parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（需与训练一致）')
-    parser.add_argument('--use_condition', action='store_true')
-    parser.add_argument('--condition_config', type=str, default='')
-    parser.add_argument('--condition_both', action='store_true')
+    parser.add_argument(
+        '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
+        help='R/P融合方式（需与训练一致）'
+    )
+    parser.add_argument(
+        '--share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_true',
+        default=True,
+        help='反应物/产物编码层共享参数（默认开启）'
+    )
+    parser.add_argument(
+        '--no_share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_false',
+        help='关闭反应物/产物编码层共享参数'
+    )
     args = parser.parse_args()
     print(args)
-
-    if args.use_condition and not args.condition_config:
-        raise ValueError("启用条件编码器需提供 --condition_config")
 
     fix_seed(args.seed)
     device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')

@@ -1,11 +1,9 @@
-from .GATconv import SelfLoopGATConv, LocalPESelfLoopGATConv
+from .GATconv import SelfLoopGATConv
 from .RAlign import RAlignGATBlock
-from .shared import PositionalEncoding, DotMhAttn, SparseEdgeUpdateLayer, FiLM
-from .DualGAT import DualGATBlock
-from .TransDec import TransDecLayer
+from .shared import DotMhAttn, SparseEdgeUpdateLayer, FiLM
 
 __all__ = [
-    'SelfLoopGATConv', 'LocalPESelfLoopGATConv', 'RAlignGATBlock',
-    'DotMhAttn', 'DualGATBlock', 'PositionalEncoding', 'TransDecLayer',
+    'SelfLoopGATConv', 'RAlignGATBlock',
+    'DotMhAttn',
     'SparseEdgeUpdateLayer', 'FiLM'
 ]

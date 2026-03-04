@@ -33,7 +33,7 @@ def swap_reaction(reaction: str) -> str:
     return f'{products}>>{reactants}'
 
 
-def load_joint_split(data_path, part, use_local_pe=False):
+def load_joint_split(data_path, part):
     csv_path = os.path.join(data_path, f'{part}.csv')
     data = pd.read_csv(csv_path)
 
@@ -47,14 +47,12 @@ def load_joint_split(data_path, part, use_local_pe=False):
     orig_set = JointDataset(
         reactions=reactions,
         is_elementary=cls_labels,
-        barrier=reg_labels,
-        use_local_pe=use_local_pe
+        barrier=reg_labels
     )
     swapped_set = JointDataset(
         reactions=[swap_reaction(x) for x in reactions],
         is_elementary=cls_labels,
-        barrier=reg_labels,
-        use_local_pe=use_local_pe
+        barrier=reg_labels
     )
     return reactions, cls_labels, reg_labels, orig_set, swapped_set
 
@@ -65,15 +63,9 @@ def build_model(args, device):
         emb_dim=args.dim,
         edge_dim=args.dim,
         heads=args.heads,
-        reac_batch_infos={},
-        prod_batch_infos={},
-        prod_num_keys={},
-        reac_num_keys={},
         dropout=0.0,
         negative_slope=args.negative_slope,
         update_last_edge=False,
-        use_lg_lin=args.use_lg_lin,
-        use_local_pe=args.use_local_pe,
         fusion_mode=args.fusion_mode
     )
     if args.share_reac_prod_encoder:
@@ -81,11 +73,9 @@ def build_model(args, device):
 
     model = JointModel(
         encoder=encoder,
-        condition_encoder=None,
         dim=args.dim,
         dropout=0.0,
-        heads=args.heads,
-        cls_out_dim=args.cls_out_dim
+        heads=args.heads
     ).to(device)
 
     state_dict = torch.load(args.checkpoint, map_location=device)
@@ -183,14 +173,23 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=int, default=0, help='GPU设备ID（-1为CPU）')
     parser.add_argument('--seed', type=int, default=2025, help='随机种子')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数（需与训练一致）')
-    parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
-    parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（需与训练一致）')
-    parser.add_argument('--use_local_pe', action='store_true', help='启用local-PE-aware GAT（需与训练一致）')
+    parser.add_argument(
+        '--share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_true',
+        default=True,
+        help='反应物/产物编码层共享参数（默认开启）'
+    )
+    parser.add_argument(
+        '--no_share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_false',
+        help='关闭反应物/产物编码层共享参数'
+    )
     parser.add_argument(
         '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
         help='R/P融合方式（需与训练一致）'
     )
-    parser.add_argument('--cls_out_dim', type=int, default=2, help='分类输出维度（需与训练一致）')
     parser.add_argument('--pos_label', type=int, default=1, help='正类标签（默认1）')
     parser.add_argument('--top_k', type=int, default=20, help='输出变化最大的前K条样本')
 
@@ -203,7 +202,7 @@ if __name__ == '__main__':
     ) if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
 
     reactions, cls_labels, reg_labels, orig_set, swapped_set = load_joint_split(
-        args.data_path, args.part, use_local_pe=args.use_local_pe
+        args.data_path, args.part
     )
     orig_loader = DataLoader(
         orig_set, batch_size=args.bs, shuffle=False,
@@ -254,7 +253,6 @@ if __name__ == '__main__':
             'dim': args.dim,
             'heads': args.heads,
             'n_layer': args.n_layer,
-            'use_local_pe': args.use_local_pe,
             'fusion_mode': args.fusion_mode,
             'num_samples': len(reactions),
             'num_reg_labeled': int(reg_labeled_mask.sum()),

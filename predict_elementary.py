@@ -11,7 +11,7 @@ from utils.training import eval_joint  # 复用联合评估函数（已支持新
 from utils.Dataset import joint_colfn
 
 from model import (
-    JointModel, RAlignEncoder, build_cn_condition_encoder_with_eval
+    JointModel, RAlignEncoder
 )
 
 from rdkit import RDLogger
@@ -42,31 +42,34 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=int, default=0, help='GPU设备ID（-1为CPU）')
     parser.add_argument('--seed', type=int, default=2025, help='随机种子')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数（需与训练一致）')
-    parser.add_argument('--use_lg_lin', action='store_true', help='启用reactant-only分支（需与训练一致）')
-    parser.add_argument('--share_reac_prod_encoder', action='store_true', help='反应物/产物编码层共享参数（需与训练一致）')
-    parser.add_argument('--use_local_pe', action='store_true', help='启用local-PE-aware GAT（需与训练一致）')
+    parser.add_argument(
+        '--share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_true',
+        default=True,
+        help='反应物/产物编码层共享参数（默认开启）'
+    )
+    parser.add_argument(
+        '--no_share_reac_prod_encoder',
+        dest='share_reac_prod_encoder',
+        action='store_false',
+        help='关闭反应物/产物编码层共享参数'
+    )
     parser.add_argument(
         '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
         help='R/P融合方式：legacy为原始对齐融合，film为对称共享FiLM（需与训练一致）'
     )
     parser.add_argument('--output_path', required=True, type=str, help='输出结果保存路径（.json）')
     parser.add_argument('--checkpoint', required=True, type=str, help='模型权重文件路径（.pth）')
-    # 任务相关参数（与训练一致，新增pos_label配置）
-    parser.add_argument('--cls_out_dim', type=int, default=2, help='分类输出维度（需与训练一致，二分类默认2）')
+    # 任务相关参数
     parser.add_argument('--pos_label', type=int, default=1, help='正类标签（需与训练一致，默认1，即"实际为真"的标签）')
-    # 条件编码器参数（与训练脚本完全一致）
-    parser.add_argument('--use_condition', action='store_true', help='是否启用条件编码器（需与训练一致）')
-    parser.add_argument('--condition_config', type=str, default='', help='条件编码器配置文件（use_condition=True时需提供）')
-    parser.add_argument('--condition_both', action='store_true', help='条件是否同时作用于反应物和产物（需与训练一致）')
 
     args = parser.parse_args()
     print(args)
 
     # 参数校验
-    if args.use_condition and not args.condition_config:
-        raise ValueError("启用条件编码器时，必须通过--condition_config指定配置文件路径")
-    if args.cls_out_dim != 2 and args.pos_label >= args.cls_out_dim:
-        raise ValueError(f"pos_label={args.pos_label} 超出分类维度 cls_out_dim={args.cls_out_dim}")
+    if args.pos_label != 1:
+        raise ValueError('当前固定为二分类，正类标签必须为 1')
 
     # 固定随机种子
     fix_seed(args.seed)
@@ -75,9 +78,7 @@ if __name__ == '__main__':
     device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
 
     # 加载数据（仅测试集，复用训练时的数据加载逻辑）
-    _, _, test_set = load_joint_data(
-        args.data_path, use_local_pe=args.use_local_pe
-    )
+    _, _, test_set = load_joint_data(args.data_path)
 
     # 数据加载器（保持与训练一致的collate_fn）
     test_loader = DataLoader(
@@ -86,42 +87,15 @@ if __name__ == '__main__':
         pin_memory=True
     )
 
-    # 构建条件信息（与训练逻辑完全一致，预测时关闭dropout）
-    if args.use_condition:
-        with open(args.condition_config) as Fin:
-            condition_config = json.load(Fin)
-        # 构建条件信息字典（适配不同mode）
-        if condition_config['mode'] == 'mix-all':
-            condition_infos = {'mixed': {'dim': condition_config['dim'], 'heads': args.heads}}
-        elif condition_config['mode'] == 'mix-catalyst-ligand':
-            condition_infos = {k: {'dim': condition_config['dim'], 'heads': args.heads}
-                              for k in ['additive', 'base', 'catalyst and ligand']}
-        else:
-            condition_infos = {k: {'dim': condition_config['dim'], 'heads': args.heads}
-                              for k in ['ligand', 'base', 'additive', 'catalyst']}
-        # 构建条件编码器（预测时dropout=0.0，避免随机影响）
-        condition_encoder, _ = build_cn_condition_encoder_with_eval(
-            config=condition_config, dropout=0.0
-        )
-    else:
-        condition_infos = {}
-        condition_encoder = None
-
     # 构建基础编码器（预测时关闭dropout，与训练结构一致）
     encoder = RAlignEncoder(
         n_layer=args.n_layer,
         emb_dim=args.dim,
         edge_dim=args.dim,
         heads=args.heads,
-        reac_batch_infos=condition_infos if args.use_condition else {},
-        prod_batch_infos=condition_infos if (args.use_condition and args.condition_both) else {},
-        prod_num_keys={},
-        reac_num_keys={},
         dropout=0.0,  # 预测时禁用dropout
         negative_slope=args.negative_slope,
         update_last_edge=False,
-        use_lg_lin=args.use_lg_lin,
-        use_local_pe=args.use_local_pe,
         fusion_mode=args.fusion_mode
     )
     if args.share_reac_prod_encoder:
@@ -130,11 +104,9 @@ if __name__ == '__main__':
     # 初始化联合模型（与训练时完全一致）
     model = JointModel(
         encoder=encoder,
-        condition_encoder=condition_encoder,
         dim=args.dim,
         dropout=0.0,  # 预测时禁用dropout
-        heads=args.heads,
-        cls_out_dim=args.cls_out_dim
+        heads=args.heads
     ).to(device)
 
     # 加载模型权重（支持CPU/GPU自动适配）
@@ -144,29 +116,24 @@ if __name__ == '__main__':
     model.eval()  # 切换到评估模式（关键：禁用BatchNorm/ dropout）
     print(f'[INFO] 模型加载完成，设备：{device}')
 
-    # 执行预测（核心：补充num_classes和pos_label，与训练一致）
+    # 执行预测
     results = eval_joint(
         test_loader, model, device,
-        lambda_reg=0.005, # 传递训练时的lambda（fixed/dynamic）
+        lambda_reg=0.005,
         total_heads=args.heads,
         local_heads=args.local_heads,
-        has_reag=args.use_condition,  # 与训练时的条件配置一致
-        num_classes=args.cls_out_dim,  # 补充：分类维度（二分类=2）
-        pos_label=args.pos_label,      # 补充：正类标签（与训练一致，影响漏检率计算）
-        return_raw=True                # 返回原始预测值和真实值，便于后续分析
+        pos_label=args.pos_label,
+        return_raw=True
     )
 
     # 整理输出结果（包含所有新增分类指标）
     output = {
         'metadata': {
             'checkpoint': args.checkpoint,
-            'use_condition': args.use_condition,
             'dim': args.dim,
             'n_layer': args.n_layer,
-            'cls_out_dim': args.cls_out_dim,
             'pos_label': args.pos_label,
             'batch_size': args.bs,
-            'use_local_pe': args.use_local_pe,
             'fusion_mode': args.fusion_mode
         },
         'classification': {
