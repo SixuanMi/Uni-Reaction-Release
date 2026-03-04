@@ -7,26 +7,13 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from utils.data_utils import load_joint_data, fix_seed
+from utils.model_factory import build_joint_model, resolve_device
 from utils.training import eval_joint  # 复用联合评估函数（已支持新增分类指标）
 from utils.Dataset import joint_colfn
-
-from model import (
-    JointModel, RAlignEncoder
-)
 
 from rdkit import RDLogger
 # 禁用RDKit日志
 RDLogger.DisableLog('rdApp.*')
-
-def tie_reac_prod_params(encoder):
-    for layer in encoder.layers:
-        layer.prod_mpnn = layer.reac_mpnn
-        layer.prod_mpnn_ln = layer.reac_mpnn_ln
-        layer.prod_fusion_ln = layer.reac_fusion_ln
-        if hasattr(layer, 'reac_ue') and hasattr(layer, 'prod_ue'):
-            layer.prod_ue = layer.reac_ue
-        if hasattr(layer, 'reac_edge_ln') and hasattr(layer, 'prod_edge_ln'):
-            layer.prod_edge_ln = layer.reac_edge_ln
 
 
 if __name__ == '__main__':
@@ -75,7 +62,7 @@ if __name__ == '__main__':
     fix_seed(args.seed)
 
     # 设备配置
-    device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
+    device = resolve_device(args.device)
 
     # 加载数据（仅测试集，复用训练时的数据加载逻辑）
     _, _, test_set = load_joint_data(args.data_path)
@@ -87,27 +74,7 @@ if __name__ == '__main__':
         pin_memory=True
     )
 
-    # 构建基础编码器（预测时关闭dropout，与训练结构一致）
-    encoder = RAlignEncoder(
-        n_layer=args.n_layer,
-        emb_dim=args.dim,
-        edge_dim=args.dim,
-        heads=args.heads,
-        dropout=0.0,  # 预测时禁用dropout
-        negative_slope=args.negative_slope,
-        update_last_edge=False,
-        fusion_mode=args.fusion_mode
-    )
-    if args.share_reac_prod_encoder:
-        tie_reac_prod_params(encoder)
-
-    # 初始化联合模型（与训练时完全一致）
-    model = JointModel(
-        encoder=encoder,
-        dim=args.dim,
-        dropout=0.0,  # 预测时禁用dropout
-        heads=args.heads
-    ).to(device)
+    model = build_joint_model(args, dropout=0.0).to(device)
 
     # 加载模型权重（支持CPU/GPU自动适配）
     print(f'[INFO] 加载模型权重: {args.checkpoint}')

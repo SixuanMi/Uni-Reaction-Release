@@ -7,26 +7,14 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from model import JointModel, RAlignEncoder
 from utils.Dataset import JointDataset, joint_colfn
 from utils.data_utils import fix_seed
+from utils.model_factory import build_joint_model, resolve_device
 from utils.tensor_utils import generate_local_global_mask
 
 from rdkit import RDLogger
 
 RDLogger.DisableLog('rdApp.*')
-
-
-def tie_reac_prod_params(encoder):
-    for layer in encoder.layers:
-        layer.prod_mpnn = layer.reac_mpnn
-        layer.prod_mpnn_ln = layer.reac_mpnn_ln
-        layer.prod_fusion_ln = layer.reac_fusion_ln
-        if hasattr(layer, 'reac_ue') and hasattr(layer, 'prod_ue'):
-            layer.prod_ue = layer.reac_ue
-        if hasattr(layer, 'reac_edge_ln') and hasattr(layer, 'prod_edge_ln'):
-            layer.prod_edge_ln = layer.reac_edge_ln
-
 
 def swap_reaction(reaction: str) -> str:
     reactants, products = reaction.strip().split('>>')
@@ -58,26 +46,7 @@ def load_joint_split(data_path, part):
 
 
 def build_model(args, device):
-    encoder = RAlignEncoder(
-        n_layer=args.n_layer,
-        emb_dim=args.dim,
-        edge_dim=args.dim,
-        heads=args.heads,
-        dropout=0.0,
-        negative_slope=args.negative_slope,
-        update_last_edge=False,
-        fusion_mode=args.fusion_mode
-    )
-    if args.share_reac_prod_encoder:
-        tie_reac_prod_params(encoder)
-
-    model = JointModel(
-        encoder=encoder,
-        dim=args.dim,
-        dropout=0.0,
-        heads=args.heads
-    ).to(device)
-
+    model = build_joint_model(args, dropout=0.0).to(device)
     state_dict = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -197,9 +166,7 @@ if __name__ == '__main__':
     print(args)
 
     fix_seed(args.seed)
-    device = torch.device(
-        f'cuda:{args.device}'
-    ) if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
+    device = resolve_device(args.device)
 
     reactions, cls_labels, reg_labels, orig_set, swapped_set = load_joint_split(
         args.data_path, args.part

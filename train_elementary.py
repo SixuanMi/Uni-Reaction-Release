@@ -9,13 +9,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from utils.data_utils import load_joint_data, fix_seed, count_parameters
+from utils.model_factory import build_joint_model, resolve_device
 from utils.training import train_joint, eval_joint  # 联合训练和评估函数
 from utils.Dataset import joint_colfn  # 双标签collate函数
-
-from model import (
-    JointModel,  # 联合模型
-    RAlignEncoder
-)
 
 from rdkit import RDLogger
 # 禁用所有 RDKit 日志（包括警告、信息等）
@@ -29,17 +25,6 @@ def make_dir(args):
     log_dir = os.path.join(detail_dir, 'log.json')
     best_model_dir = os.path.join(detail_dir, 'best_model.pth')
     return log_dir, best_model_dir
-
-
-def tie_reac_prod_params(encoder):
-    for layer in encoder.layers:
-        layer.prod_mpnn = layer.reac_mpnn
-        layer.prod_mpnn_ln = layer.reac_mpnn_ln
-        layer.prod_fusion_ln = layer.reac_fusion_ln
-        if hasattr(layer, 'reac_ue') and hasattr(layer, 'prod_ue'):
-            layer.prod_ue = layer.reac_ue
-        if hasattr(layer, 'reac_edge_ln') and hasattr(layer, 'prod_edge_ln'):
-            layer.prod_edge_ln = layer.reac_edge_ln
 
 
 if __name__ == '__main__':
@@ -97,7 +82,7 @@ if __name__ == '__main__':
     fix_seed(args.seed)
 
     # 设备配置
-    device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
+    device = resolve_device(args.device)
 
     current_lambda = args.lambda_reg
 
@@ -136,27 +121,7 @@ if __name__ == '__main__':
         pin_memory=True
     )
 
-    # 构建基础编码器
-    encoder = RAlignEncoder(
-        n_layer=args.n_layer,
-        emb_dim=args.dim,
-        edge_dim=args.dim,
-        heads=args.heads,
-        dropout=args.dropout,
-        negative_slope=args.negative_slope,
-        update_last_edge=False,
-        fusion_mode=args.fusion_mode
-    )
-    if args.share_reac_prod_encoder:
-        tie_reac_prod_params(encoder)
-
-    # 初始化联合模型
-    model = JointModel(
-        encoder=encoder,
-        dim=args.dim,
-        dropout=args.dropout,
-        heads=args.heads
-    ).to(device)
+    model = build_joint_model(args, dropout=args.dropout).to(device)
 
     # 统计模型参数
     total_params, trainable_params = count_parameters(model)

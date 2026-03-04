@@ -8,24 +8,14 @@ import numpy as np
 import torch
 
 from utils.data_utils import load_joint_data_one, fix_seed
+from utils.model_factory import build_joint_model, resolve_device
 from utils.training.training import eval_joint
 from utils.Dataset import joint_colfn
-from model import JointModel, RAlignEncoder
 from torch.utils.data import DataLoader
 
 from rdkit import RDLogger
 
 RDLogger.DisableLog('rdApp.*')
-
-def tie_reac_prod_params(encoder):
-    for layer in encoder.layers:
-        layer.prod_mpnn = layer.reac_mpnn
-        layer.prod_mpnn_ln = layer.reac_mpnn_ln
-        layer.prod_fusion_ln = layer.reac_fusion_ln
-        if hasattr(layer, 'reac_ue') and hasattr(layer, 'prod_ue'):
-            layer.prod_ue = layer.reac_ue
-        if hasattr(layer, 'reac_edge_ln') and hasattr(layer, 'prod_edge_ln'):
-            layer.prod_edge_ln = layer.reac_edge_ln
 
 
 def collect_model_paths(model_paths: List[str], model_root: str) -> List[str]:
@@ -37,30 +27,6 @@ def collect_model_paths(model_paths: List[str], model_root: str) -> List[str]:
             paths = glob.glob(os.path.join(model_root, "**", "best_model.pt"), recursive=True)
         return sorted(paths)
     raise ValueError("未找到模型路径，请提供 --model_paths 或 --main_dir（默认搜索 logs 子目录）")
-
-
-def build_model(args, dropout: float):
-    encoder = RAlignEncoder(
-        n_layer=args.n_layer,
-        emb_dim=args.dim,
-        edge_dim=args.dim,
-        heads=args.heads,
-        dropout=dropout,
-        negative_slope=args.negative_slope,
-        update_last_edge=False,
-        fusion_mode=args.fusion_mode
-    )
-    if args.share_reac_prod_encoder:
-        tie_reac_prod_params(encoder)
-
-    return JointModel(
-        encoder=encoder,
-        dim=args.dim,
-        dropout=dropout,
-        heads=args.heads
-    )
-
-
 def majority_vote_cls(cls_preds: np.ndarray) -> np.ndarray:
     # cls_preds: [n_models, n_samples]
     out = []
@@ -118,7 +84,7 @@ def main():
     print(args)
 
     fix_seed(args.seed)
-    device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
+    device = resolve_device(args.device)
 
     # 解析默认目录
     default_data = None
@@ -153,7 +119,7 @@ def main():
     true_reg = None
 
     for p in paths:
-        m = build_model(args, dropout=0.0).to(device)
+        m = build_joint_model(args, dropout=0.0).to(device)
         state = torch.load(p, map_location=device)
         m.load_state_dict(state)
         m.eval()

@@ -11,23 +11,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from utils.data_utils import fix_seed
+from utils.model_factory import build_joint_model, resolve_device
 from utils.Dataset import RAlignDatasetBase, graph_col_fn
-from model import JointModel, RAlignEncoder
 
 from rdkit import RDLogger
 
 RDLogger.DisableLog('rdApp.*')
-
-def tie_reac_prod_params(encoder):
-    for layer in encoder.layers:
-        layer.prod_mpnn = layer.reac_mpnn
-        layer.prod_mpnn_ln = layer.reac_mpnn_ln
-        layer.prod_fusion_ln = layer.reac_fusion_ln
-        if hasattr(layer, 'reac_ue') and hasattr(layer, 'prod_ue'):
-            layer.prod_ue = layer.reac_ue
-        if hasattr(layer, 'reac_edge_ln') and hasattr(layer, 'prod_edge_ln'):
-            layer.prod_edge_ln = layer.reac_edge_ln
-
 
 class SimpleRxnDataset(RAlignDatasetBase):
     """仅包含反应 SMILES 的推理数据集，返回 reac/prod 图和原始 SMILES。"""
@@ -43,30 +32,6 @@ def simple_collate(batch):
         prods.append(prod)
         raws.append(raw)
     return graph_col_fn(reacs), graph_col_fn(prods), raws
-
-
-def build_model(args, dropout: float):
-    encoder = RAlignEncoder(
-        n_layer=args.n_layer,
-        emb_dim=args.dim,
-        edge_dim=args.dim,
-        heads=args.heads,
-        dropout=dropout,
-        negative_slope=args.negative_slope,
-        update_last_edge=False,
-        fusion_mode=args.fusion_mode
-    )
-    if args.share_reac_prod_encoder:
-        tie_reac_prod_params(encoder)
-
-    return JointModel(
-        encoder=encoder,
-        dim=args.dim,
-        dropout=dropout,
-        heads=args.heads
-    )
-
-
 def collect_model_paths(model_paths: List[str], main_dir: str) -> List[str]:
     if model_paths:
         return model_paths
@@ -190,7 +155,7 @@ def main():
     print(args)
 
     fix_seed(args.seed)
-    device = torch.device(f'cuda:{args.device}') if (torch.cuda.is_available() and args.device >= 0) else torch.device('cpu')
+    device = resolve_device(args.device)
 
     paths = collect_model_paths(args.model_paths, args.main_dir)
     if len(paths) == 0:
@@ -209,7 +174,7 @@ def main():
     per_model_reg = []
 
     for p in paths:
-        model = build_model(args, dropout=0.0).to(device)
+        model = build_joint_model(args, dropout=0.0).to(device)
         state = torch.load(p, map_location=device)
         model.load_state_dict(state)
         model.eval()
