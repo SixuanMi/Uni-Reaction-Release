@@ -25,15 +25,21 @@ def warmup_lr_scheduler(optimizer, warmup_iters, warmup_factor):
 
 def train_joint(
     loader, model, optimizer, device, lambda_reg=0.005,
-    total_heads=None, local_heads=0, warmup=False
+    total_heads=None, local_heads=0, warmup=False,
+    warmup_scheduler=None, warmup_total_steps=0
 ):
     model.train()
     total_losses = []
     cls_losses = []
     reg_losses = []
-    if warmup:
-        warmup_iters = len(loader) - 1
-        warmup_sher = warmup_lr_scheduler(optimizer, warmup_iters, 5e-2)
+    local_warmup_scheduler = warmup_scheduler
+    local_warmup_total_steps = warmup_total_steps
+    # Backward-compatible fallback: if caller only passes warmup=True.
+    if local_warmup_scheduler is None and warmup:
+        local_warmup_total_steps = max(len(loader) - 1, 1)
+        local_warmup_scheduler = warmup_lr_scheduler(
+            optimizer, local_warmup_total_steps, 5e-2
+        )
 
     for reac, prod, cls_label, reg_label in tqdm(loader):
         reac, prod = reac.to(device), prod.to(device)
@@ -66,8 +72,11 @@ def train_joint(
         total_losses.append(total_loss.item())
         cls_losses.append(cls_loss.item())
         reg_losses.append(reg_loss.item())
-        if warmup:
-            warmup_sher.step()
+        if local_warmup_scheduler is not None:
+            # Execute warmup only once globally. After warmup is done, stop stepping
+            # this scheduler to avoid overriding later ReduceLROnPlateau updates.
+            if (local_warmup_scheduler.last_epoch + 1) < local_warmup_total_steps:
+                local_warmup_scheduler.step()
 
     return (
         np.mean(total_losses),

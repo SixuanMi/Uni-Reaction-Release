@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from utils.data_utils import load_joint_data, fix_seed, count_parameters
 from utils.model_factory import build_joint_model, resolve_device
 from utils.training import train_joint, eval_joint  # 联合训练和评估函数
+from utils.training.training import warmup_lr_scheduler
 from utils.Dataset import joint_colfn  # 双标签collate函数
 
 from rdkit import RDLogger
@@ -144,6 +145,15 @@ if __name__ == '__main__':
         f'early_stop_patience={early_stop_patience}, '
         f'metric=val PR-AUC, auc_delta={args.auc_delta:.1e}'
     )
+    warmup_total_steps = max(args.warmup, 0) * len(train_loader)
+    warmup_sher = None
+    if warmup_total_steps > 0:
+        warmup_sher = warmup_lr_scheduler(
+            optimizer, warmup_total_steps, 5e-2
+        )
+        print(f'[Warmup设置] warmup_epochs={args.warmup}, warmup_steps={warmup_total_steps}')
+    else:
+        print('[Warmup设置] warmup关闭')
 
 
     # 日志初始化
@@ -183,9 +193,10 @@ if __name__ == '__main__':
         train_total_loss, train_cls_loss, train_reg_loss = train_joint(
             train_loader, model, optimizer, device,
             lambda_reg=current_lambda,
-            warmup=(ep < args.warmup),
             total_heads=args.heads,
-            local_heads=args.local_heads
+            local_heads=args.local_heads,
+            warmup_scheduler=warmup_sher,
+            warmup_total_steps=warmup_total_steps
         )
         # 联合评估
         val_metric = eval_joint(
