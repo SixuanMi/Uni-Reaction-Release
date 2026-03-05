@@ -134,8 +134,7 @@ Example:
 Notes:
 
 - `base_log` defaults to `log_single_<timestamp>` if not provided.
-- shared reactant/product encoder is enabled by default.
-- pass `--no_share_reac_prod_encoder` only for ablation.
+- shared reactant/product encoder is now hard-enabled (no CLI switch).
 
 ### Ensemble / Multi-Fold
 

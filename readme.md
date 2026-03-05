@@ -137,8 +137,7 @@ reactants>>products
 说明：
 
 - 如果不显式传 `base_log`，默认日志目录为 `log_single_<timestamp>`
-- 反应物/产物编码器共享默认开启
-- 只有做消融实验时才需要传 `--no_share_reac_prod_encoder`
+- 反应物/产物编码器共享已硬编码开启（不再提供开关）
 
 ### 多模型 / 多折训练
 

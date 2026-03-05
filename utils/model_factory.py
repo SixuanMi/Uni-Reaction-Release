@@ -25,8 +25,7 @@ def build_joint_model(args, dropout: float):
         update_last_edge=False,
         fusion_mode=args.fusion_mode
     )
-    if args.share_reac_prod_encoder:
-        tie_reac_prod_params(encoder)
+    tie_reac_prod_params(encoder)
 
     return JointModel(
         encoder=encoder,

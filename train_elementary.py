@@ -52,19 +52,6 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=2025, help='随机种子（保证可复现）')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数')
     parser.add_argument(
-        '--share_reac_prod_encoder',
-        dest='share_reac_prod_encoder',
-        action='store_true',
-        default=True,
-        help='反应物/产物编码层共享参数（默认开启）'
-    )
-    parser.add_argument(
-        '--no_share_reac_prod_encoder',
-        dest='share_reac_prod_encoder',
-        action='store_false',
-        help='关闭反应物/产物编码层共享参数'
-    )
-    parser.add_argument(
         '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
         help='R/P融合方式：legacy为原始对齐融合，film为对称共享FiLM'
     )

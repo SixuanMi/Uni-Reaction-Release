@@ -90,19 +90,6 @@ def main():
         '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
         help='R/P融合方式（需与训练一致）'
     )
-    parser.add_argument(
-        '--share_reac_prod_encoder',
-        dest='share_reac_prod_encoder',
-        action='store_true',
-        default=True,
-        help='反应物/产物编码层共享参数（默认开启）'
-    )
-    parser.add_argument(
-        '--no_share_reac_prod_encoder',
-        dest='share_reac_prod_encoder',
-        action='store_false',
-        help='关闭反应物/产物编码层共享参数'
-    )
     args = parser.parse_args()
     print(args)
 
