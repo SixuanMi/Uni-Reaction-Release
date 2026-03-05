@@ -20,9 +20,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser('联合模型预测（适配FocalLoss+完整分类指标）')
     # 核心参数（与训练脚本完全保持一致）
     parser.add_argument('--data_path', required=True, type=str, help='数据路径（包含test.csv）')
-    parser.add_argument('--dim', type=int, default=128, help='模型维度（需与训练一致）')
+    parser.add_argument('--dim', type=int, default=192, help='模型维度（需与训练一致）')
     parser.add_argument('--heads', type=int, default=8, help='注意力头数（需与训练一致）')
-    parser.add_argument('--n_layer', type=int, default=3, help='编码器层数（需与训练一致）')
+    parser.add_argument('--n_layer', type=int, default=5, help='编码器层数（需与训练一致）')
     parser.add_argument('--num_worker', type=int, default=8, help='数据加载线程数')
     parser.add_argument('--bs', type=int, default=128, help='批次大小')
     parser.add_argument('--negative_slope', type=float, default=0.2, help='LeakyReLU斜率（需与训练一致）')
