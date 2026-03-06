@@ -36,13 +36,13 @@ if __name__ == '__main__':
     parser.add_argument('--heads', type=int, default=8, help='注意力头数')
     parser.add_argument('--n_layer', type=int, default=5, help='编码器层数') # 5
     parser.add_argument('--dropout', type=float, default=0.2, help='dropout概率')
-    parser.add_argument('--warmup', type=int, default=20, help='热身轮数')
+    parser.add_argument('--warmup', type=int, default=5, help='热身轮数')
     parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数') # 0.7
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
-    parser.add_argument('--auc_delta', type=float, default=1e-4, help='PR-AUC最小提升阈值（用于LR调度/最佳模型/早停）')
+    parser.add_argument('--auc_delta', type=float, default=2e-5, help='PR-AUC最小提升阈值（用于LR调度/最佳模型/早停）')
     parser.add_argument('--min_lr', type=float, default=1e-6, help='学习率最小值（用于LR调度与早停触发）')
     parser.add_argument('--lr', type=float, default=2e-4, help='初始学习率') # 2e-4
-    parser.add_argument('--epoch', type=int, default=120, help='训练总轮数') # 100-200
+    parser.add_argument('--epoch', type=int, default=200, help='训练总轮数') # 100-200
     parser.add_argument('--base_log', type=str, default='log_joint', help='日志保存根目录')
     parser.add_argument('--num_worker', type=int, default=8, help='数据加载线程数')
     parser.add_argument('--bs', type=int, default=128, help='批次大小')
@@ -52,7 +52,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=2025, help='随机种子（保证可复现）')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数')
     parser.add_argument(
-        '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
+        '--fusion_mode', type=str, default='film', choices=['legacy', 'film'],
         help='R/P融合方式：legacy为原始对齐融合，film为对称共享FiLM'
     )
     parser.add_argument('--lambda_reg', type=float, default=5e-3, help='回归损失权重 λ')
@@ -212,7 +212,7 @@ if __name__ == '__main__':
         print(
             f'[验证集] ACC: {val_metric["classification"]["ACC"]:.4f}, '
             f'F1: {val_metric["classification"]["F1"]:.4f}, '
-            f'PR-AUC: {val_metric["classification"]["PR_AUC"]:.4f}, '
+            f'PR-AUC: {val_metric["classification"]["PR_AUC"]:.5f}, '
             f'PR阈值(max-F1): {val_metric["classification"]["PR_BEST_F1_THRESHOLD"]:.4f}, '
             f'PR-maxF1: {val_metric["classification"]["PR_BEST_F1"]:.4f}'
         )
@@ -229,7 +229,7 @@ if __name__ == '__main__':
         print(
             f'[测试集] ACC: {test_metric["classification"]["ACC"]:.4f}, '
             f'F1: {test_metric["classification"]["F1"]:.4f}, '
-            f'PR-AUC: {test_metric["classification"]["PR_AUC"]:.4f}, '
+            f'PR-AUC: {test_metric["classification"]["PR_AUC"]:.5f}, '
             f'PR阈值(max-F1): {test_metric["classification"]["PR_BEST_F1_THRESHOLD"]:.4f}, '
             f'PR-maxF1: {test_metric["classification"]["PR_BEST_F1"]:.4f}'
         )
@@ -273,7 +273,7 @@ if __name__ == '__main__':
                 best_cls_pr_auc = cur_pr_auc
                 best_pr_auc_ep = ep + 1
                 torch.save(model.state_dict(), best_model_dir)
-                print(f'[最佳模型更新] 轮次: {best_pr_auc_ep}, 验证PR-AUC: {best_cls_pr_auc:.4f}')
+                print(f'[最佳模型更新] 轮次: {best_pr_auc_ep}, 验证PR-AUC: {best_cls_pr_auc:.5f}')
         else:
             print('[最佳模型更新] 当前验证PR-AUC为NaN，跳过本轮AUC最优模型更新')
 
@@ -283,7 +283,7 @@ if __name__ == '__main__':
                 if np.isfinite(cur_pr_auc) and cur_pr_auc > min_lr_best_pr_auc + args.auc_delta:
                     min_lr_best_pr_auc = cur_pr_auc
                     min_lr_no_improve_epochs = 0
-                    print(f'[早停计数] 最小学习率下PR-AUC提升至 {min_lr_best_pr_auc:.4f}，计数重置')
+                    print(f'[早停计数] 最小学习率下PR-AUC提升至 {min_lr_best_pr_auc:.5f}，计数重置')
                 else:
                     min_lr_no_improve_epochs += 1
                     if np.isfinite(cur_pr_auc):
@@ -316,7 +316,7 @@ if __name__ == '__main__':
     if early_stop_epoch is not None:
         print(f'[训练提前结束] 早停轮次: {early_stop_epoch}')
     if best_pr_auc_ep > 0:
-        print(f'最佳模型：轮次 {best_pr_auc_ep}, 验证PR-AUC: {best_cls_pr_auc:.4f}, '
+        print(f'最佳模型：轮次 {best_pr_auc_ep}, 验证PR-AUC: {best_cls_pr_auc:.5f}, '
             f'验证F1 {log_info["valid_metric"][best_pr_auc_ep - 1]["classification"]["F1"]:.4f}, '
             f'验证R2 {log_info["valid_metric"][best_pr_auc_ep - 1]["regression"]["R2"]:.4f}, '
             f'验证MAE {log_info["valid_metric"][best_pr_auc_ep - 1]["regression"]["MAE"]:.4f}, '
