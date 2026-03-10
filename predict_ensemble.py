@@ -29,13 +29,25 @@ def collect_model_paths(model_paths: List[str], model_root: str) -> List[str]:
     raise ValueError("未找到模型路径，请提供 --model_paths 或 --main_dir（默认搜索 logs 子目录）")
 
 
-def majority_vote_cls(cls_preds: np.ndarray) -> np.ndarray:
+def majority_vote_cls(cls_preds: np.ndarray, tie_break_prob: np.ndarray = None, cls_threshold: float = 0.5) -> np.ndarray:
     # cls_preds: [n_models, n_samples]
     out = []
     for i in range(cls_preds.shape[1]):
-        votes = np.bincount(cls_preds[:, i].astype(int))
-        out.append(np.argmax(votes))
-    return np.array(out)
+        votes = np.bincount(cls_preds[:, i].astype(int), minlength=2)
+        if votes[0] == votes[1]:
+            if tie_break_prob is not None:
+                out.append(int(tie_break_prob[i] >= cls_threshold))
+            else:
+                out.append(0)
+        else:
+            out.append(int(np.argmax(votes)))
+    return np.array(out, dtype=int)
+
+
+def soft_vote_cls(cls_scores: np.ndarray, cls_threshold: float = 0.5) -> np.ndarray:
+    # cls_scores: [n_models, n_samples], each value is positive-class probability
+    mean_prob = np.nanmean(cls_scores, axis=0)
+    return (mean_prob >= cls_threshold).astype(int)
 
 
 def mean_reg(all_reg: np.ndarray) -> np.ndarray:
@@ -86,6 +98,14 @@ def main():
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--seed', type=int, default=2025)
     parser.add_argument('--local_heads', type=int, default=4)
+    parser.add_argument(
+        '--vote_mode', type=str, default='soft', choices=['hard', 'soft'],
+        help='分类集成方式：hard=多数票，soft=平均概率后按阈值判定（推荐）'
+    )
+    parser.add_argument(
+        '--cls_threshold', type=float, default=0.5,
+        help='soft 投票阈值（mean_prob >= threshold 判为正类）'
+    )
     parser.add_argument(
         '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
         help='R/P融合方式（需与训练一致）'
@@ -157,16 +177,25 @@ def main():
     reg_preds = np.stack(reg_preds, axis=0)
 
     # 集成
-    vote_cls = majority_vote_cls(cls_preds)
-    mean_reg_pred = mean_reg(reg_preds)
-
     mean_prob_per_sample = np.nanmean(cls_scores, axis=0)  # [n_samples]
+    if args.vote_mode == 'soft':
+        vote_cls = soft_vote_cls(cls_scores, cls_threshold=args.cls_threshold)
+    else:
+        vote_cls = majority_vote_cls(
+            cls_preds,
+            tie_break_prob=mean_prob_per_sample,
+            cls_threshold=args.cls_threshold
+        )
+
+    mean_reg_pred = mean_reg(reg_preds)
     reg_std_per_sample = std_reg(reg_preds, mean_reg_pred)
 
     # 汇总
     out = {
         'model_paths': paths,
         'classification': {
+            'vote_mode': args.vote_mode,
+            'threshold': float(args.cls_threshold),
             'true': true_cls.tolist(),
             'pred': vote_cls.tolist(),
             'mean_prob': mean_prob_per_sample.tolist()  # 每个样本的平均正类概率
@@ -191,9 +220,10 @@ def main():
     print('\n' + '=' * 50)
     print('[投票预测完成！关键指标汇总]')
     print('=' * 50)
-    # 分类多数投票
+    # 分类投票（hard/soft）
     acc = float(np.mean(true_cls == vote_cls))
     print('[分类任务]')
+    print(f'  投票方式: {args.vote_mode} (threshold={args.cls_threshold:.3f})')
     print(f'  准确率（ACC）: {acc:.4f}')
     print(f'  混淆矩阵:')
     cm = np.zeros((2, 2), dtype=int)
