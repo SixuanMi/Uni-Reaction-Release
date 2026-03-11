@@ -310,8 +310,6 @@ def main():
 
     # 保留输入 CSV 的全部原始列，便于后续 active_select 与回溯
     df_out = df_in.copy()
-    if "Reaction" not in df_out.columns:
-        df_out["Reaction"] = reactions
     for i in range(len(paths)):
         df_out[f"model{i+1}_cls_prob"] = per_model_cls[i]
         df_out[f"model{i+1}_barrier"] = per_model_reg[i]

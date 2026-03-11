@@ -189,3 +189,5 @@ echo "[INFO] Step 2/2: Active selection"
 echo "[INFO] Pipeline finished"
 echo "[INFO] Infer output : ${INFER_OUT}"
 echo "[INFO] Select output: ${SELECT_OUT}"
+
+# ./scripts/active_learning_pipeline.sh --input /inspire/qb-ilm/project/chemicalreaction/misixuan-CZXS24220243/github/2daam2d/depth0_sample1/enumerate_steoro/sampled_depth0_sample1_aug_stereo.csv --main_dir vote_run_1773147960_vote8 --output_dir al/depth0_sample1 --devices 0,1,2,3 --top_n 2000 --num_worker 80 --bs 2048 --uncertainty_metric bald --reg_uncertainty_metric binned_z
