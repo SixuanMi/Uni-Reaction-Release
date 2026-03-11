@@ -140,11 +140,13 @@ def prepare_splits(
     if missing:
         raise ValueError(f"缺少列: {missing}")
 
-    keep_cols = ['Reaction', 'Is_elementary', 'Barrier']
+    base_cols = ['Reaction', 'Is_elementary', 'Barrier']
+    keep_cols = base_cols
     if prev_round_dir:
         if id_col not in df.columns:
             raise ValueError(f"使用 --prev_round_dir 时，当前数据必须包含标识列 {id_col}")
-        keep_cols = [id_col] + keep_cols
+        # 避免 id_col 与基础列重名（如 id_col=Reaction）导致重复列
+        keep_cols = [id_col] + [c for c in base_cols if c != id_col]
     df = df[keep_cols].copy()
     df['Is_elementary'] = df['Is_elementary'].astype(int)
 
