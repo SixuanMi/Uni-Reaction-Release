@@ -1,8 +1,11 @@
 import argparse
 import glob
 import json
+import multiprocessing as mp
 import os
-from typing import List
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from types import SimpleNamespace
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -27,6 +30,78 @@ def collect_model_paths(model_paths: List[str], model_root: str) -> List[str]:
             paths = glob.glob(os.path.join(model_root, "**", "best_model.pt"), recursive=True)
         return sorted(paths)
     raise ValueError("未找到模型路径，请提供 --model_paths 或 --main_dir（默认搜索 logs 子目录）")
+
+
+def parse_device_ids(devices: str, fallback_device: int) -> List[int]:
+    if devices is None:
+        return [fallback_device]
+    ids = []
+    for token in devices.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            ids.append(int(token))
+        except ValueError as e:
+            raise ValueError(f"--devices 中存在非法设备编号: {token}") from e
+    if not ids:
+        raise ValueError("--devices 不能为空，请提供如 0,1,2 的设备列表")
+    return ids
+
+
+def same_with_nan(a: np.ndarray, b: np.ndarray) -> bool:
+    if a.shape != b.shape:
+        return False
+    both_nan = np.isnan(a) & np.isnan(b)
+    return bool(np.all((a == b) | both_nan))
+
+
+def infer_one_model(
+    model_path: str,
+    data_path: str,
+    device_id: int,
+    model_cfg: Dict,
+    bs: int,
+    num_worker: int,
+    total_heads: int,
+    local_heads: int,
+    seed: int
+) -> Dict:
+    fix_seed(seed)
+    device = resolve_device(device_id)
+
+    test_set = load_joint_data_one(data_path, 'test')
+    test_loader = DataLoader(
+        test_set, batch_size=bs, shuffle=False,
+        collate_fn=joint_colfn, num_workers=num_worker,
+        pin_memory=(device.type == 'cuda')
+    )
+
+    model_args = SimpleNamespace(**model_cfg)
+    model = build_joint_model(model_args, dropout=0.0).to(device)
+    state = torch.load(model_path, map_location=device)
+    model.load_state_dict(state)
+    model.eval()
+
+    res = eval_joint(
+        loader=test_loader,
+        model=model,
+        device=device,
+        total_heads=total_heads,
+        local_heads=local_heads,
+        return_raw=True,
+        pos_label=1,
+        lambda_reg=0.005
+    )
+    return {
+        'model_path': model_path,
+        'device': str(device),
+        'cls_pred': res['raw']['cls_pred'],
+        'cls_scores': res['raw']['cls_scores'],
+        'reg_pred': res['raw']['reg_pred'],
+        'cls_true': res['raw']['cls_true'],
+        'reg_true': res['raw']['reg_true']
+    }
 
 
 def majority_vote_cls(cls_preds: np.ndarray, tie_break_prob: np.ndarray = None, cls_threshold: float = 0.5) -> np.ndarray:
@@ -96,6 +171,7 @@ def main():
     parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--num_worker', type=int, default=8)
     parser.add_argument('--device', type=int, default=0)
+    parser.add_argument('--devices', type=str, default=None, help='逗号分隔设备ID，如 0,1,2；用于多卡并行推理')
     parser.add_argument('--seed', type=int, default=2025)
     parser.add_argument('--local_heads', type=int, default=4)
     parser.add_argument(
@@ -114,7 +190,8 @@ def main():
     print(args)
 
     fix_seed(args.seed)
-    device = resolve_device(args.device)
+    device_ids = parse_device_ids(args.devices, args.device)
+    print(f"[INFO] 推理设备: {device_ids}")
 
     # 解析默认目录
     default_data = None
@@ -136,45 +213,87 @@ def main():
     if not data_path:
         raise ValueError("请提供 --data_path 或 --main_dir")
     test_set = load_joint_data_one(data_path, 'test')
-    test_loader = DataLoader(
-        test_set, batch_size=args.bs, shuffle=False,
-        collate_fn=joint_colfn, num_workers=args.num_worker, pin_memory=True
-    )
+    n_samples = len(test_set)
+    print(f"[INFO] 测试样本数: {n_samples}")
 
-    # 逐模型预测
-    cls_preds = []
-    cls_scores = []
-    reg_preds = []
-    true_cls = None
-    true_reg = None
+    model_cfg = {
+        'dim': args.dim,
+        'heads': args.heads,
+        'n_layer': args.n_layer,
+        'negative_slope': args.negative_slope,
+        'fusion_mode': args.fusion_mode
+    }
 
-    for p in paths:
-        m = build_joint_model(args, dropout=0.0).to(device)
-        state = torch.load(p, map_location=device)
-        m.load_state_dict(state)
-        m.eval()
-        print(f"[INFO] 模型加载完成: {p}")
-
-        res = eval_joint(
-            loader=test_loader,
-            model=m,
-            device=device,
-            total_heads=args.heads,
-            local_heads=args.local_heads,
-            return_raw=True,
-            pos_label=1,
-            lambda_reg=0.005
+    per_model_results = [None] * len(paths)
+    if len(device_ids) == 1:
+        single_device = device_ids[0]
+        print(f"[INFO] 单卡推理模式: device={single_device}")
+        for idx, p in enumerate(paths):
+            res = infer_one_model(
+                model_path=p,
+                data_path=data_path,
+                device_id=single_device,
+                model_cfg=model_cfg,
+                bs=args.bs,
+                num_worker=args.num_worker,
+                total_heads=args.heads,
+                local_heads=args.local_heads,
+                seed=args.seed
+            )
+            per_model_results[idx] = res
+            print(f"[INFO] 模型推理完成 ({idx + 1}/{len(paths)}): {p} @ {res['device']}")
+    else:
+        max_parallel = min(len(paths), len(device_ids))
+        per_proc_num_worker = args.num_worker // max_parallel if args.num_worker > 0 else 0
+        print(
+            f"[INFO] 多卡并行推理模式: 并行进程={max_parallel}, "
+            f"每进程DataLoader workers={per_proc_num_worker}"
         )
-        cls_preds.append(np.array(res['raw']['cls_pred']))
-        cls_scores.append(np.array(res['raw']['cls_scores']))
-        reg_preds.append(np.array(res['raw']['reg_pred']))
-        if true_cls is None:
-            true_cls = np.array(res['raw']['cls_true'])
-            true_reg = np.array(res['raw']['reg_true'])
+        ctx = mp.get_context('spawn')
+        with ProcessPoolExecutor(max_workers=max_parallel, mp_context=ctx) as executor:
+            future_to_meta = {}
+            for idx, p in enumerate(paths):
+                assigned_device = device_ids[idx % len(device_ids)]
+                fut = executor.submit(
+                    infer_one_model,
+                    p,
+                    data_path,
+                    assigned_device,
+                    model_cfg,
+                    args.bs,
+                    per_proc_num_worker,
+                    args.heads,
+                    args.local_heads,
+                    args.seed
+                )
+                future_to_meta[fut] = (idx, p, assigned_device)
 
-    cls_preds = np.stack(cls_preds, axis=0)
-    cls_scores = np.stack(cls_scores, axis=0)
-    reg_preds = np.stack(reg_preds, axis=0)
+            finished = 0
+            for fut in as_completed(future_to_meta):
+                idx, p, assigned_device = future_to_meta[fut]
+                try:
+                    res = fut.result()
+                except Exception as e:
+                    raise RuntimeError(f"模型推理失败: path={p}, device={assigned_device}") from e
+                per_model_results[idx] = res
+                finished += 1
+                print(
+                    f"[INFO] 模型推理完成 ({finished}/{len(paths)}): "
+                    f"{p} @ {res['device']}"
+                )
+
+    cls_preds = np.stack([np.array(x['cls_pred']) for x in per_model_results], axis=0)
+    cls_scores = np.stack([np.array(x['cls_scores']) for x in per_model_results], axis=0)
+    reg_preds = np.stack([np.array(x['reg_pred']) for x in per_model_results], axis=0)
+    true_cls = np.array(per_model_results[0]['cls_true'])
+    true_reg = np.array(per_model_results[0]['reg_true'])
+    for i, r in enumerate(per_model_results[1:], start=1):
+        cls_true_i = np.array(r['cls_true'])
+        reg_true_i = np.array(r['reg_true'])
+        if not np.array_equal(true_cls, cls_true_i):
+            raise ValueError(f"第 {i + 1} 个模型返回的 cls_true 与第1个模型不一致")
+        if not same_with_nan(true_reg, reg_true_i):
+            raise ValueError(f"第 {i + 1} 个模型返回的 reg_true 与第1个模型不一致")
 
     # 集成
     mean_prob_per_sample = np.nanmean(cls_scores, axis=0)  # [n_samples]
