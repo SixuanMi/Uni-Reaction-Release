@@ -9,6 +9,8 @@ set -euo pipefail
 #   N_FOLDS(默认5), TEST_SIZE(默认0.1), SEED(默认2025)
 #   PARALLEL_JOBS(默认1): 同时训练的 fold 数量
 #   GPU_IDS(默认"0"): 逗号分隔 GPU 编号，按 fold 轮询分配
+#   PREV_ROUND_DIR(可选): 上一轮划分目录（含 train/val/test），用于动态 test 防泄漏
+#   ID_COL(默认Name): PREV_ROUND_DIR 模式下用于跨轮匹配的样本标识列
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
@@ -26,6 +28,8 @@ TEST_SIZE=${TEST_SIZE:-0.1}
 SEED=${SEED:-2025}
 PARALLEL_JOBS=${PARALLEL_JOBS:-1}
 GPU_IDS=${GPU_IDS:-0}
+PREV_ROUND_DIR=${PREV_ROUND_DIR:-}
+ID_COL=${ID_COL:-Name}
 
 if (( PARALLEL_JOBS < 1 )); then
   echo "[ERROR] PARALLEL_JOBS 必须 >= 1，当前为 ${PARALLEL_JOBS}" >&2
@@ -44,12 +48,17 @@ SPLIT_DIR="${BASE_DIR}/folds"
 LOG_ROOT="${BASE_DIR}/logs"
 
 echo "[INFO] 生成分层拆分: 全局测试占比 ${TEST_SIZE}, 折数 ${N_FOLDS}, 输出 ${SPLIT_DIR}"
-python "${ROOT_DIR}/prepare_joint_folds.py" \
-  --data_path "${DATA_PATH}" \
-  --output_dir "${SPLIT_DIR}" \
-  --n_folds "${N_FOLDS}" \
-  --test_size "${TEST_SIZE}" \
+PREPARE_ARGS=(
+  --data_path "${DATA_PATH}"
+  --output_dir "${SPLIT_DIR}"
+  --n_folds "${N_FOLDS}"
+  --test_size "${TEST_SIZE}"
   --seed "${SEED}"
+)
+if [[ -n "${PREV_ROUND_DIR}" ]]; then
+  PREPARE_ARGS+=(--prev_round_dir "${PREV_ROUND_DIR}" --id_col "${ID_COL}")
+fi
+python "${ROOT_DIR}/prepare_joint_folds.py" "${PREPARE_ARGS[@]}"
 
 EXTRA_ARGS=("$@")
 PIDS=()
@@ -106,3 +115,4 @@ fi
 echo "[INFO] 全部 fold 训练完成"
 
 # N_FOLDS=8 PARALLEL_JOBS=8 GPU_IDS=0,1,2,3 ./scripts/train_ensemble.sh --data_path ../dataset/ready_v6_t1xTruexTB_FalsexTB_stereo_cycle0/ --dim 192 --n_layer 5 --lr 2e-4 --num_worker 10 --epoch 200 --fusion_mode film --warmup 5
+# PREV_ROUND_DIR=vote_run_1773147960_vote8/folds/fold_1 N_FOLDS=8 PARALLEL_JOBS=8 GPU_IDS=0,1,2,3 ./scripts/train_ensemble.sh --data_path ../dataset/ready_v7_depth0_active1/ --num_worker 10

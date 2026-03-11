@@ -40,7 +40,7 @@ if __name__ == '__main__':
     parser.add_argument('--lrfactor', type=float, default=0.5, help='学习率衰减系数') # 0.7
     parser.add_argument('--lrpatience', type=int, default=5, help='验证集指标连续未衰减轮数')
     parser.add_argument('--auc_delta', type=float, default=2e-5, help='PR-AUC最小提升阈值（用于LR调度/最佳模型/早停）')
-    parser.add_argument('--min_lr', type=float, default=1e-6, help='学习率最小值（用于LR调度与早停触发）')
+    parser.add_argument('--min_lr', type=float, default=5e-6, help='学习率最小值（用于LR调度与早停触发）')
     parser.add_argument('--lr', type=float, default=2e-4, help='初始学习率') # 2e-4
     parser.add_argument('--epoch', type=int, default=200, help='训练总轮数') # 100-200
     parser.add_argument('--base_log', type=str, default='log_joint', help='日志保存根目录')
