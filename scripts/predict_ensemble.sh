@@ -22,3 +22,5 @@ if [[ -n "${GPU_IDS}" && ${HAS_DEVICES_ARG} -eq 0 ]]; then
 fi
 
 python "${ROOT_DIR}/predict_ensemble.py" "${ARGS[@]}"
+
+# ./scripts/predict_ensemble.sh --main_dir vote_run_1773379256_depth0_active3/ --fusion_mode film --devices 0,1,2,3 --num_workers 80

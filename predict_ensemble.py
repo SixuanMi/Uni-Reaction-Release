@@ -9,6 +9,13 @@ from typing import Dict, List
 
 import numpy as np
 import torch
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+)
 
 from utils.data_utils import load_joint_data_one, fix_seed
 from utils.model_factory import build_joint_model, resolve_device
@@ -158,6 +165,52 @@ def std_reg(all_reg: np.ndarray, mean_reg_values: np.ndarray) -> np.ndarray:
     return out
 
 
+def compute_classification_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_score: np.ndarray,
+    pos_label: int = 1
+) -> Dict:
+    acc = float(np.mean(y_true == y_pred))
+    precision = float(precision_score(y_true, y_pred, pos_label=pos_label, zero_division=0))
+    recall = float(recall_score(y_true, y_pred, pos_label=pos_label, zero_division=0))
+    f1 = float(f1_score(y_true, y_pred, pos_label=pos_label, zero_division=0))
+
+    y_true_bin = (y_true == pos_label).astype(np.int32)
+    pr_auc = float('nan')
+    pr_best_f1 = float('nan')
+    pr_best_threshold = float('nan')
+    if np.unique(y_true_bin).size >= 2:
+        try:
+            pr_auc = float(average_precision_score(y_true_bin, y_score))
+            pr_precision, pr_recall, pr_thresholds = precision_recall_curve(y_true_bin, y_score)
+            if pr_thresholds.size > 0:
+                pr_f1 = 2 * pr_precision[:-1] * pr_recall[:-1] / np.clip(
+                    pr_precision[:-1] + pr_recall[:-1], 1e-12, None
+                )
+                best_idx = int(np.nanargmax(pr_f1))
+                pr_best_f1 = float(pr_f1[best_idx])
+                pr_best_threshold = float(pr_thresholds[best_idx])
+        except Exception:
+            pass
+
+    cm = np.zeros((2, 2), dtype=int)
+    for t, p in zip(y_true, y_pred):
+        if t < 2 and p < 2:
+            cm[t, p] += 1
+
+    return {
+        'ACC': acc,
+        'Precision': precision,
+        'Recall': recall,
+        'F1': f1,
+        'PR_AUC': pr_auc,
+        'PR_BEST_F1': pr_best_f1,
+        'PR_BEST_F1_THRESHOLD': pr_best_threshold,
+        'Confusion_Matrix': cm.tolist(),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser("多模型投票/平均评估")
     parser.add_argument('--main_dir', type=str, default=None, help='训练输出的根目录（如 vote_run_xxx，自动找 folds/test 和 logs）')
@@ -183,7 +236,7 @@ def main():
         help='soft 投票阈值（mean_prob >= threshold 判为正类）'
     )
     parser.add_argument(
-        '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
+        '--fusion_mode', type=str, default='film', choices=['legacy', 'film'],
         help='R/P融合方式（需与训练一致）'
     )
     args = parser.parse_args()
@@ -308,6 +361,12 @@ def main():
 
     mean_reg_pred = mean_reg(reg_preds)
     reg_std_per_sample = std_reg(reg_preds, mean_reg_pred)
+    cls_metrics = compute_classification_metrics(
+        y_true=true_cls,
+        y_pred=vote_cls,
+        y_score=mean_prob_per_sample,
+        pos_label=1
+    )
 
     # 汇总
     out = {
@@ -317,7 +376,8 @@ def main():
             'threshold': float(args.cls_threshold),
             'true': true_cls.tolist(),
             'pred': vote_cls.tolist(),
-            'mean_prob': mean_prob_per_sample.tolist()  # 每个样本的平均正类概率
+            'mean_prob': mean_prob_per_sample.tolist(),  # 每个样本的平均正类概率
+            'metrics': cls_metrics
             # 'prob_mean_all': float(np.nanmean(mean_prob_per_sample))  # 全局平均概率
         },
         'regression': {
@@ -340,29 +400,19 @@ def main():
     print('[投票预测完成！关键指标汇总]')
     print('=' * 50)
     # 分类投票（hard/soft）
-    acc = float(np.mean(true_cls == vote_cls))
     print('[分类任务]')
     print(f'  投票方式: {args.vote_mode} (threshold={args.cls_threshold:.3f})')
-    print(f'  准确率（ACC）: {acc:.4f}')
+    print(f'  准确率（ACC）: {cls_metrics["ACC"]:.4f}')
+    print(f'  精确率（Precision）: {cls_metrics["Precision"]:.4f}')
+    print(f'  召回率（Recall, 正类 1）: {cls_metrics["Recall"]:.4f}')
+    print(f'  F1: {cls_metrics["F1"]:.4f}')
+    print(f'  PR-AUC: {cls_metrics["PR_AUC"]:.5f}')
+    print(f'  PR阈值(max-F1): {cls_metrics["PR_BEST_F1_THRESHOLD"]:.4f}')
+    print(f'  PR-maxF1: {cls_metrics["PR_BEST_F1"]:.4f}')
     print(f'  混淆矩阵:')
-    cm = np.zeros((2, 2), dtype=int)
-    for t, p in zip(true_cls, vote_cls):
-        if t < 2 and p < 2:
-            cm[t, p] += 1
+    cm = np.array(cls_metrics['Confusion_Matrix'])
     for row in cm:
         print(f'    {row}')
-
-    # 计算召回率（Recall），假设正类别为 1
-    # True Positive (TP): cm[1, 1]
-    # False Negative (FN): cm[1, 0]
-    tp = cm[1, 1]
-    fn = cm[1, 0]
-    if (tp + fn) > 0:
-        recall = float(tp / (tp + fn))
-    else:
-        # 如果真值为正例的样本数为 0，召回率记为 NaN
-        recall = float('nan')
-    print(f'  召回率（Recall, 正类 1）: {recall:.4f}')
     # 回归简单平均
     valid_mask = np.isfinite(true_reg)
     if np.any(valid_mask):

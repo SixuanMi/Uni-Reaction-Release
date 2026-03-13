@@ -30,7 +30,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=2025, help='随机种子')
     parser.add_argument('--local_heads', type=int, default=4, help='本地注意力头数（需与训练一致）')
     parser.add_argument(
-        '--fusion_mode', type=str, default='legacy', choices=['legacy', 'film'],
+        '--fusion_mode', type=str, default='film', choices=['legacy', 'film'],
         help='R/P融合方式：legacy为原始对齐融合，film为对称共享FiLM（需与训练一致）'
     )
     parser.add_argument('--output_path', required=True, type=str, help='输出结果保存路径（.json）')
