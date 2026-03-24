@@ -26,12 +26,13 @@ def warmup_lr_scheduler(optimizer, warmup_iters, warmup_factor):
 def train_joint(
     loader, model, optimizer, device, lambda_reg=0.005,
     total_heads=None, local_heads=0, warmup=False,
-    warmup_scheduler=None, warmup_total_steps=0
+    warmup_scheduler=None, warmup_total_steps=0, focal_alpha=0.5
 ):
     model.train()
     total_losses = []
     cls_losses = []
     reg_losses = []
+    focal_loss_fn = FocalLoss(gamma=2.0, alpha=focal_alpha)
     local_warmup_scheduler = warmup_scheduler
     local_warmup_total_steps = warmup_total_steps
     # Backward-compatible fallback: if caller only passes warmup=True.
@@ -54,7 +55,7 @@ def train_joint(
             cross_mask = None
 
         cls_out, reg_out = model(reac, prod, None, cross_mask=cross_mask)
-        cls_loss = FocalLoss(gamma=2.0)(cls_out, cls_label)
+        cls_loss = focal_loss_fn(cls_out, cls_label)
 
         reg_valid_mask = torch.isfinite(reg_label)
         if reg_valid_mask.any():
@@ -87,7 +88,7 @@ def train_joint(
 
 def eval_joint(
     loader, model, device, total_heads=None, local_heads=0, return_raw=False,
-    pos_label=1, lambda_reg=0.005
+    pos_label=1, lambda_reg=0.005, focal_alpha=0.5
 ):
     model.eval()
     cls_true, cls_pred, cls_scores = [], [], []
@@ -95,6 +96,7 @@ def eval_joint(
     val_total_loss = []
     val_cls_loss = []
     val_reg_loss = []
+    focal_loss_fn = FocalLoss(gamma=2.0, alpha=focal_alpha)
 
     for reac, prod, cls_label, reg_label in tqdm(loader):
         reac, prod = reac.to(device), prod.to(device)
@@ -110,7 +112,7 @@ def eval_joint(
 
         with torch.no_grad():
             cls_out, reg_out = model(reac, prod, None, cross_mask=cross_mask)
-            cls_loss = FocalLoss(gamma=2.0)(cls_out, cls_label)
+            cls_loss = focal_loss_fn(cls_out, cls_label)
 
             reg_valid_mask = torch.isfinite(reg_label)
             reg_out_flat = reg_out.view(-1)

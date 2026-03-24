@@ -114,5 +114,5 @@ fi
 
 echo "[INFO] 全部 fold 训练完成"
 
-# N_FOLDS=8 PARALLEL_JOBS=8 GPU_IDS=0,1,2,3 ./scripts/train_ensemble.sh --data_path ../dataset/ready_v6_t1xTruexTB_FalsexTB_stereo_cycle0/ --dim 192 --n_layer 5 --lr 2e-4 --num_worker 10 --epoch 200 --fusion_mode film --warmup 5
+# N_FOLDS=8 PARALLEL_JOBS=8 GPU_IDS=0,1,2,3 ./scripts/train_ensemble.sh --data_path ../dataset/ready_v6_t1xTruexTB_FalsexTB_stereo_cycle0/ --dim 192 --n_layer 5 --lr 2e-4 --num_worker 10 --epoch 200 --fusion_mode film --warmup 5 --focal_alpha 0.5
 # ID_COL=Reaction PREV_ROUND_DIR=vote_run_1773147960_vote8/folds/fold_1 N_FOLDS=8 PARALLEL_JOBS=8 GPU_IDS=0,1,2,3 ./scripts/train_ensemble.sh --data_path ../dataset/ready_v7_depth0_active1/ --num_worker 10

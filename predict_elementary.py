@@ -37,6 +37,10 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', required=True, type=str, help='模型权重文件路径（.pth）')
     # 任务相关参数
     parser.add_argument('--pos_label', type=int, default=1, help='正类标签（需与训练一致，默认1，即"实际为真"的标签）')
+    parser.add_argument(
+        '--focal_alpha', type=float, default=0.5,
+        help='FocalLoss中正类(label=1)权重alpha，范围[0,1]；仅影响loss统计，不影响分类概率输出'
+    )
 
     args = parser.parse_args()
     print(args)
@@ -44,6 +48,8 @@ if __name__ == '__main__':
     # 参数校验
     if args.pos_label != 1:
         raise ValueError('当前固定为二分类，正类标签必须为 1')
+    if not (0.0 <= args.focal_alpha <= 1.0):
+        raise ValueError("--focal_alpha 必须在 [0, 1] 范围内")
 
     # 固定随机种子
     fix_seed(args.seed)
@@ -74,6 +80,7 @@ if __name__ == '__main__':
     results = eval_joint(
         test_loader, model, device,
         lambda_reg=0.005,
+        focal_alpha=args.focal_alpha,
         total_heads=args.heads,
         local_heads=args.local_heads,
         pos_label=args.pos_label,

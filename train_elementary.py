@@ -57,6 +57,10 @@ if __name__ == '__main__':
     )
     parser.add_argument('--lambda_reg', type=float, default=5e-3, help='回归损失权重 λ')
     parser.add_argument(
+        '--focal_alpha', type=float, default=0.5,
+        help='FocalLoss中正类(label=1)权重alpha，范围[0,1]'
+    )
+    parser.add_argument(
         '--early_stop_patience',
         type=int,
         default=None,
@@ -85,6 +89,8 @@ if __name__ == '__main__':
         raise ValueError("--min_lr 必须大于0")
     if args.auc_delta < 0:
         raise ValueError("--auc_delta 不能为负数")
+    if not (0.0 <= args.focal_alpha <= 1.0):
+        raise ValueError("--focal_alpha 必须在 [0, 1] 范围内")
         
     # 加载双任务数据
     train_set, val_set, test_set = load_joint_data(args.data_path)
@@ -183,7 +189,8 @@ if __name__ == '__main__':
             total_heads=args.heads,
             local_heads=args.local_heads,
             warmup_scheduler=warmup_sher,
-            warmup_total_steps=warmup_total_steps
+            warmup_total_steps=warmup_total_steps,
+            focal_alpha=args.focal_alpha
         )
         # 联合评估
         val_metric = eval_joint(
@@ -191,13 +198,15 @@ if __name__ == '__main__':
             lambda_reg=current_lambda,
             total_heads=args.heads,
             local_heads=args.local_heads,
-            pos_label=1
+            pos_label=1,
+            focal_alpha=args.focal_alpha
         )
         test_metric = eval_joint(
             test_loader, model, device,
             total_heads=args.heads,
             local_heads=args.local_heads,
-            pos_label=1
+            pos_label=1,
+            focal_alpha=args.focal_alpha
         )
 
         # 打印指标
