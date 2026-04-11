@@ -211,6 +211,25 @@ def compute_classification_metrics(
     }
 
 
+def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
+    valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    if np.any(valid_mask):
+        true_valid = y_true[valid_mask]
+        pred_valid = y_pred[valid_mask]
+        mae = float(np.mean(np.abs(true_valid - pred_valid)))
+        mse = float(np.mean((true_valid - pred_valid) ** 2))
+        # R2 计算防止除0
+        var = np.var(true_valid)
+        r2 = float(1 - mse / var) if var > 0 else float('nan')
+    else:
+        mae = mse = r2 = float('nan')
+    return {
+        'MAE': mae,
+        'MSE': mse,
+        'R2': r2
+    }
+
+
 def main():
     parser = argparse.ArgumentParser("多模型投票/平均评估")
     parser.add_argument('--main_dir', type=str, default=None, help='训练输出的根目录（如 vote_run_xxx，自动找 folds/test 和 logs）')
@@ -367,10 +386,55 @@ def main():
         y_score=mean_prob_per_sample,
         pos_label=1
     )
+    reg_metrics = compute_regression_metrics(true_reg, mean_reg_pred)
+
+    per_model_metrics = []
+    for r in per_model_results:
+        model_cls_pred = np.array(r['cls_pred'])
+        model_cls_scores = np.array(r['cls_scores'])
+        model_reg_pred = np.array(r['reg_pred'])
+        model_cls_metrics = compute_classification_metrics(
+            y_true=true_cls,
+            y_pred=model_cls_pred,
+            y_score=model_cls_scores,
+            pos_label=1
+        )
+        model_reg_metrics = compute_regression_metrics(
+            y_true=true_reg,
+            y_pred=model_reg_pred
+        )
+        per_model_metrics.append({
+            'model_path': r['model_path'],
+            'device': r['device'],
+            'classification': {
+                'metrics': model_cls_metrics
+            },
+            'regression': {
+                'metrics': model_reg_metrics
+            }
+        })
+
+    cls_metric_keys = [
+        'ACC', 'Precision', 'Recall', 'F1',
+        'PR_AUC', 'PR_BEST_F1', 'PR_BEST_F1_THRESHOLD'
+    ]
+    reg_metric_keys = ['MAE', 'MSE', 'R2']
+    per_model_metric_vectors = {
+        'classification': {
+            k: [float(m['classification']['metrics'][k]) for m in per_model_metrics]
+            for k in cls_metric_keys
+        },
+        'regression': {
+            k: [float(m['regression']['metrics'][k]) for m in per_model_metrics]
+            for k in reg_metric_keys
+        }
+    }
 
     # 汇总
     out = {
         'model_paths': paths,
+        'per_model': per_model_metrics,
+        'per_model_metric_vectors': per_model_metric_vectors,
         'classification': {
             'vote_mode': args.vote_mode,
             'threshold': float(args.cls_threshold),
@@ -383,7 +447,8 @@ def main():
         'regression': {
             'true': true_reg.tolist(),
             'pred': mean_reg_pred.tolist(),
-            'std_all_models': reg_std_per_sample.tolist()  # 每个样本的预测标准差
+            'std_all_models': reg_std_per_sample.tolist(),  # 每个样本的预测标准差
+            'metrics': reg_metrics
         }
     }
 
@@ -413,20 +478,10 @@ def main():
     cm = np.array(cls_metrics['Confusion_Matrix'])
     for row in cm:
         print(f'    {row}')
-    # 回归简单平均
-    valid_mask = np.isfinite(true_reg)
-    if np.any(valid_mask):
-        mae = float(np.mean(np.abs(true_reg[valid_mask] - mean_reg_pred[valid_mask])))
-        mse = float(np.mean((true_reg[valid_mask] - mean_reg_pred[valid_mask]) ** 2))
-        # R2 计算防止除0
-        var = np.var(true_reg[valid_mask])
-        r2 = float(1 - mse / var) if var > 0 else float('nan')
-    else:
-        mae = mse = r2 = float('nan')
     print('\n[回归任务]')
-    print(f'  MAE: {mae:.4f}')
-    print(f'  MSE: {mse:.4f}')
-    print(f'  R2: {r2:.4f}')
+    print(f'  MAE: {reg_metrics["MAE"]:.4f}')
+    print(f'  MSE: {reg_metrics["MSE"]:.4f}')
+    print(f'  R2: {reg_metrics["R2"]:.4f}')
     print(f'\n结果文件保存路径: {output_path}')
     print('=' * 50)
 
