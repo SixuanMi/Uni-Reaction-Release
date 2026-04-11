@@ -48,7 +48,7 @@ def extract_metric_vectors(data: Dict, source_path: str) -> Dict[str, Dict[str, 
     )
 
 
-def independent_ttest(a: np.ndarray, b: np.ndarray) -> Dict[str, float]:
+def independent_ttest(a: np.ndarray, b: np.ndarray, alternative: str) -> Dict[str, float]:
     a_valid = a[np.isfinite(a)]
     b_valid = b[np.isfinite(b)]
     n_a = int(a_valid.size)
@@ -66,10 +66,26 @@ def independent_ttest(a: np.ndarray, b: np.ndarray) -> Dict[str, float]:
     }
     if n_a >= 2 and n_b >= 2:
         try:
-            # 普通独立样本 t 检验（假设两组方差相等）
+            # 语义: 以 B 相对 A 的方向进行检验
             result["p_ttest_ind"] = float(
-                ttest_ind(a_valid, b_valid, equal_var=True, nan_policy="omit").pvalue
+                ttest_ind(
+                    b_valid, a_valid,
+                    equal_var=True,
+                    nan_policy="omit",
+                    alternative=alternative
+                ).pvalue
             )
+        except TypeError:
+            # 兼容旧版 SciPy（不支持 alternative 参数）
+            out = ttest_ind(b_valid, a_valid, equal_var=True, nan_policy="omit")
+            p_two = float(out.pvalue)
+            t_stat = float(out.statistic)
+            if alternative == "two-sided":
+                result["p_ttest_ind"] = p_two
+            elif alternative == "greater":
+                result["p_ttest_ind"] = p_two / 2.0 if t_stat >= 0 else 1.0 - p_two / 2.0
+            elif alternative == "less":
+                result["p_ttest_ind"] = p_two / 2.0 if t_stat <= 0 else 1.0 - p_two / 2.0
         except Exception:
             pass
     return result
@@ -86,6 +102,13 @@ def main():
     parser.add_argument("--a", required=True, help="基线 JSON（如上一轮 ensemble_result.json）")
     parser.add_argument("--b", required=True, help="对比 JSON（如下一轮 ensemble_result.json）")
     parser.add_argument("--alpha", type=float, default=0.05, help="显著性阈值，默认 0.05")
+    parser.add_argument(
+        "--alternative",
+        type=str,
+        default="greater",
+        choices=["greater", "less", "two-sided"],
+        help="t 检验方向（相对 A 看 B）：greater=检验 B>A（默认），less=检验 B<A，two-sided=双端检验"
+    )
     parser.add_argument("--output", type=str, default=None, help="可选：将完整检验结果写入 JSON")
     args = parser.parse_args()
 
@@ -101,6 +124,7 @@ def main():
         "input_a": args.a,
         "input_b": args.b,
         "alpha": args.alpha,
+        "alternative": args.alternative,
         "results": {}
     }
 
@@ -109,6 +133,7 @@ def main():
     print(f"A: {args.a}")
     print(f"B: {args.b}")
     print(f"alpha: {args.alpha}")
+    print(f"alternative: {args.alternative} (direction is B relative to A)")
     print("tests: independent two-sample t-test (equal_var=True)")
     print("=" * 110)
 
@@ -125,7 +150,7 @@ def main():
             arr_a = metrics_a[group][metric_name]
             arr_b = metrics_b[group][metric_name]
 
-            stats = independent_ttest(arr_a, arr_b)
+            stats = independent_ttest(arr_a, arr_b, alternative=args.alternative)
             report["results"][group][metric_name] = stats
 
             p_main = stats["p_ttest_ind"]

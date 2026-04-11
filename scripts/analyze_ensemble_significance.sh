@@ -10,5 +10,6 @@ python "${ROOT_DIR}/analyze_ensemble_significance.py" "$@"
 # ./scripts/analyze_ensemble_significance.sh \
 #   --a /path/to/prev_round/ensemble_result.json \
 #   --b /path/to/next_round/ensemble_result.json \
+#   --alternative greater \
 #   --alpha 0.05 \
 #   --output /path/to/significance_report.json
