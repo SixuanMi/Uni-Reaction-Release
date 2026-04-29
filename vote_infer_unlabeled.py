@@ -194,6 +194,12 @@ def main():
     parser.add_argument("--num_worker", type=int, default=8)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--devices", type=str, default=None, help="逗号分隔设备ID，如 0,1,2；用于多卡并行推理")
+    parser.add_argument(
+        "--models_per_device_parallel",
+        type=int,
+        default=1,
+        help="每张GPU上同时运行的模型推理进程数；默认1表示每张卡内模型顺序推理"
+    )
     parser.add_argument("--seed", type=int, default=2025)
     parser.add_argument("--local_heads", type=int, default=4)
     parser.add_argument(
@@ -209,8 +215,11 @@ def main():
         raise ValueError("vote_infer_unlabeled 仅支持 CSV 输出")
 
     fix_seed(args.seed)
+    if args.models_per_device_parallel < 1:
+        raise ValueError("--models_per_device_parallel 必须 >= 1")
     device_ids = parse_device_ids(args.devices, args.device)
     print(f"[INFO] 推理设备: {device_ids}")
+    print(f"[INFO] 每设备并发模型进程数: {args.models_per_device_parallel}")
 
     df_in = pd.read_csv(args.input)
     reaction_col = resolve_reaction_column(df_in, args.reaction_col)
@@ -239,7 +248,23 @@ def main():
         assigned_device = device_ids[idx % len(device_ids)]
         assigned[assigned_device].append(p)
 
-    device_tasks = [(d, assigned[d]) for d in device_ids if assigned[d]]
+    device_tasks = []
+    for d in device_ids:
+        device_model_paths = assigned[d]
+        if not device_model_paths:
+            continue
+        n_parallel = min(args.models_per_device_parallel, len(device_model_paths))
+        if n_parallel == 1:
+            device_tasks.append((d, device_model_paths))
+            continue
+
+        buckets = [[] for _ in range(n_parallel)]
+        for idx, p in enumerate(device_model_paths):
+            buckets[idx % n_parallel].append(p)
+        for bucket in buckets:
+            if bucket:
+                device_tasks.append((d, bucket))
+
     per_model_outputs = [None] * len(paths)
     path_to_idx = {p: i for i, p in enumerate(paths)}
 
@@ -263,9 +288,14 @@ def main():
         max_parallel = len(device_tasks)
         per_proc_num_worker = args.num_worker // max_parallel if args.num_worker > 0 else 0
         print(
-            f"[INFO] 多卡并行推理模式: 并行进程={max_parallel}, "
+            f"[INFO] 并行推理模式: 并行进程={max_parallel}, "
             f"每进程DataLoader workers={per_proc_num_worker}"
         )
+        for task_idx, (d, model_paths) in enumerate(device_tasks, start=1):
+            print(
+                f"[INFO] 任务 {task_idx}/{len(device_tasks)}: "
+                f"device={d}, 模型数={len(model_paths)}"
+            )
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=max_parallel, mp_context=ctx) as executor:
             futures = {}
