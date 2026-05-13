@@ -22,6 +22,7 @@ Options:
   --dim N                  Model hidden dimension. Default: 384
   --num_worker N           DataLoader workers. Default: 15
   --bs N                   Batch size. Default: 2048
+  --chunk_size N           CSV rows per streaming inference chunk. Default: 200000
   --device ID              GPU id. Default: 0
   --devices IDS            Comma-separated GPU ids for multi-GPU inference, e.g. 0,1,2,3.
                            If provided, this overrides --device.
@@ -58,6 +59,7 @@ INTERVAL_SECONDS=1800
 DIM=384
 NUM_WORKER=15
 BS=2048
+CHUNK_SIZE=200000
 DEVICE=0
 DEVICES=""
 MODELS_PER_DEVICE_PARALLEL=1
@@ -98,6 +100,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bs)
       BS="${2:?missing value for --bs}"
+      shift 2
+      ;;
+    --chunk_size)
+      CHUNK_SIZE="${2:?missing value for --chunk_size}"
       shift 2
       ;;
     --device)
@@ -204,6 +210,7 @@ infer_one_file() {
     --dim "${DIM}"
     --num_worker "${NUM_WORKER}"
     --bs "${BS}"
+    --chunk_size "${CHUNK_SIZE}"
     --reaction_col "${REACTION_COL}"
     --fusion_mode "${FUSION_MODE}"
     --heads "${HEADS}"

@@ -2,7 +2,7 @@ import argparse
 import glob
 import multiprocessing as mp
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import queue
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -113,22 +113,15 @@ def build_model_from_checkpoint(
     return model
 
 
-def infer_models_on_device(
-    device_id: int,
+def infer_loaded_models_on_reactions(
+    models: List,
     model_paths: List[str],
-    input_path: str,
-    reaction_col: str,
-    model_cfg: Dict,
+    reactions: List[str],
+    device: torch.device,
+    device_id: int,
     bs: int,
     num_worker: int,
-    fusion_mode: str,
-    seed: int
-) -> Dict:
-    fix_seed(seed)
-    device = resolve_device(device_id)
-
-    df_rxn = pd.read_csv(input_path, usecols=[reaction_col])
-    reactions = df_rxn[reaction_col].astype(str).tolist()
+) -> List[Dict]:
     dataset = SimpleRxnDataset(reactions)
     loader = DataLoader(
         dataset,
@@ -140,13 +133,7 @@ def infer_models_on_device(
     )
 
     outputs = []
-    for idx, p in enumerate(model_paths, start=1):
-        model = build_model_from_checkpoint(
-            checkpoint_path=p,
-            model_cfg=model_cfg,
-            fusion_mode=fusion_mode,
-            device=device
-        )
+    for model, p in zip(models, model_paths):
         cls_list, reg_list = [], []
         with torch.no_grad():
             for reac, prod, _ in tqdm(
@@ -162,21 +149,135 @@ def infer_models_on_device(
                 cls_list.append(cls_prob)
                 reg_list.append(reg_pred)
 
-        cls_concat = np.concatenate(cls_list, axis=0).astype(np.float32, copy=False)
-        reg_concat = np.concatenate(reg_list, axis=0).astype(np.float32, copy=False)
+        if cls_list:
+            cls_concat = np.concatenate(cls_list, axis=0).astype(np.float32, copy=False)
+            reg_concat = np.concatenate(reg_list, axis=0).astype(np.float32, copy=False)
+        else:
+            cls_concat = np.array([], dtype=np.float32)
+            reg_concat = np.array([], dtype=np.float32)
         outputs.append({
             "model_path": p,
             "cls_prob": cls_concat,
             "reg_pred": reg_concat
         })
-        del model
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+    return outputs
+
+
+def infer_worker(
+    worker_id: int,
+    device_id: int,
+    model_paths: List[str],
+    task_queue,
+    result_queue,
+    model_cfg: Dict,
+    bs: int,
+    num_worker: int,
+    fusion_mode: str,
+    seed: int
+) -> None:
+    try:
+        fix_seed(seed + worker_id)
+        device = resolve_device(device_id)
+        cached_models = None
+        if len(model_paths) == 1:
+            cached_models = [
+                build_model_from_checkpoint(
+                    checkpoint_path=model_paths[0],
+                    model_cfg=model_cfg,
+                    fusion_mode=fusion_mode,
+                    device=device
+                )
+            ]
+            load_msg = "已常驻加载模型数=1"
+        else:
+            load_msg = f"将按 chunk 顺序加载模型数={len(model_paths)}"
         print(
-            f"[INFO] 设备 {device} 完成模型 ({idx}/{len(model_paths)}): "
-            f"{p} (fusion_mode={fusion_mode})"
+            f"[INFO] worker={worker_id} 设备 {device} {load_msg} "
+            f"(fusion_mode={fusion_mode})",
+            flush=True
         )
-    return {"device": str(device), "outputs": outputs}
+
+        while True:
+            task = task_queue.get()
+            if task is None:
+                break
+            chunk_idx, reactions = task
+            if cached_models is not None:
+                outputs = infer_loaded_models_on_reactions(
+                    models=cached_models,
+                    model_paths=model_paths,
+                    reactions=reactions,
+                    device=device,
+                    device_id=device_id,
+                    bs=bs,
+                    num_worker=num_worker,
+                )
+            else:
+                outputs = []
+                for p in model_paths:
+                    model = build_model_from_checkpoint(
+                        checkpoint_path=p,
+                        model_cfg=model_cfg,
+                        fusion_mode=fusion_mode,
+                        device=device
+                    )
+                    outputs.extend(infer_loaded_models_on_reactions(
+                        models=[model],
+                        model_paths=[p],
+                        reactions=reactions,
+                        device=device,
+                        device_id=device_id,
+                        bs=bs,
+                        num_worker=num_worker,
+                    ))
+                    del model
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
+            result_queue.put({
+                "status": "ok",
+                "worker_id": worker_id,
+                "chunk_idx": chunk_idx,
+                "device": str(device),
+                "outputs": outputs,
+            })
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+    except Exception as e:
+        result_queue.put({
+            "status": "error",
+            "worker_id": worker_id,
+            "device_id": device_id,
+            "error": repr(e),
+        })
+
+
+def build_device_tasks(
+    paths: List[str],
+    device_ids: List[int],
+    models_per_device_parallel: int
+) -> List:
+    assigned = {d: [] for d in device_ids}
+    for idx, p in enumerate(paths):
+        assigned_device = device_ids[idx % len(device_ids)]
+        assigned[assigned_device].append(p)
+
+    device_tasks = []
+    for d in device_ids:
+        device_model_paths = assigned[d]
+        if not device_model_paths:
+            continue
+        n_parallel = min(models_per_device_parallel, len(device_model_paths))
+        if n_parallel == 1:
+            device_tasks.append((d, device_model_paths))
+            continue
+
+        buckets = [[] for _ in range(n_parallel)]
+        for idx, p in enumerate(device_model_paths):
+            buckets[idx % n_parallel].append(p)
+        for bucket in buckets:
+            if bucket:
+                device_tasks.append((d, bucket))
+    return device_tasks
 
 
 def main():
@@ -192,6 +293,12 @@ def main():
     parser.add_argument("--negative_slope", type=float, default=0.2)
     parser.add_argument("--bs", type=int, default=128)
     parser.add_argument("--num_worker", type=int, default=8)
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=200000,
+        help="CSV 流式推理块大小；越小越省内存但调度开销越大"
+    )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--devices", type=str, default=None, help="逗号分隔设备ID，如 0,1,2；用于多卡并行推理")
     parser.add_argument(
@@ -217,18 +324,16 @@ def main():
     fix_seed(args.seed)
     if args.models_per_device_parallel < 1:
         raise ValueError("--models_per_device_parallel 必须 >= 1")
+    if args.chunk_size < 1:
+        raise ValueError("--chunk_size 必须 >= 1")
     device_ids = parse_device_ids(args.devices, args.device)
     print(f"[INFO] 推理设备: {device_ids}")
     print(f"[INFO] 每设备并发模型进程数: {args.models_per_device_parallel}")
+    print(f"[INFO] CSV chunk_size: {args.chunk_size}")
 
-    df_in = pd.read_csv(args.input)
-    reaction_col = resolve_reaction_column(df_in, args.reaction_col)
-    if df_in[reaction_col].isna().any():
-        raise ValueError(f"反应列 {reaction_col} 存在空值，请先清理")
-    reactions = df_in[reaction_col].astype(str).tolist()
-    if not reactions:
-        raise ValueError("未读取到任何反应 SMILES")
-    print(f"[INFO] 读取样本数: {len(reactions)}, 反应列: {reaction_col}")
+    df_header = pd.read_csv(args.input, nrows=0)
+    reaction_col = resolve_reaction_column(df_header, args.reaction_col)
+    print(f"[INFO] 反应列: {reaction_col}")
 
     paths = collect_model_paths(args.model_paths, args.main_dir)
     if len(paths) == 0:
@@ -242,108 +347,130 @@ def main():
         "negative_slope": args.negative_slope,
     }
 
-    # 将模型按设备轮询分配，保证多卡负载均衡
-    assigned = {d: [] for d in device_ids}
-    for idx, p in enumerate(paths):
-        assigned_device = device_ids[idx % len(device_ids)]
-        assigned[assigned_device].append(p)
-
-    device_tasks = []
-    for d in device_ids:
-        device_model_paths = assigned[d]
-        if not device_model_paths:
-            continue
-        n_parallel = min(args.models_per_device_parallel, len(device_model_paths))
-        if n_parallel == 1:
-            device_tasks.append((d, device_model_paths))
-            continue
-
-        buckets = [[] for _ in range(n_parallel)]
-        for idx, p in enumerate(device_model_paths):
-            buckets[idx % n_parallel].append(p)
-        for bucket in buckets:
-            if bucket:
-                device_tasks.append((d, bucket))
-
-    per_model_outputs = [None] * len(paths)
+    device_tasks = build_device_tasks(paths, device_ids, args.models_per_device_parallel)
     path_to_idx = {p: i for i, p in enumerate(paths)}
-
-    if len(device_tasks) == 1:
-        d, model_paths = device_tasks[0]
-        print(f"[INFO] 单卡推理模式: device={d}, 模型数={len(model_paths)}")
-        result = infer_models_on_device(
-            device_id=d,
-            model_paths=model_paths,
-            input_path=args.input,
-            reaction_col=reaction_col,
-            model_cfg=model_cfg,
-            bs=args.bs,
-            num_worker=args.num_worker,
-            fusion_mode=args.fusion_mode,
-            seed=args.seed
-        )
-        for out in result["outputs"]:
-            per_model_outputs[path_to_idx[out["model_path"]]] = out
-    else:
-        max_parallel = len(device_tasks)
-        per_proc_num_worker = args.num_worker // max_parallel if args.num_worker > 0 else 0
+    max_parallel = len(device_tasks)
+    per_proc_num_worker = args.num_worker // max_parallel if args.num_worker > 0 else 0
+    print(
+        f"[INFO] 流式并行推理模式: 并行进程={max_parallel}, "
+        f"每进程DataLoader workers={per_proc_num_worker}"
+    )
+    for task_idx, (d, model_paths) in enumerate(device_tasks, start=1):
         print(
-            f"[INFO] 并行推理模式: 并行进程={max_parallel}, "
-            f"每进程DataLoader workers={per_proc_num_worker}"
+            f"[INFO] worker {task_idx - 1}: device={d}, 模型数={len(model_paths)}"
         )
-        for task_idx, (d, model_paths) in enumerate(device_tasks, start=1):
-            print(
-                f"[INFO] 任务 {task_idx}/{len(device_tasks)}: "
-                f"device={d}, 模型数={len(model_paths)}"
-            )
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=max_parallel, mp_context=ctx) as executor:
-            futures = {}
-            for d, model_paths in device_tasks:
-                fut = executor.submit(
-                    infer_models_on_device,
-                    d,
-                    model_paths,
-                    args.input,
-                    reaction_col,
-                    model_cfg,
-                    args.bs,
-                    per_proc_num_worker,
-                    args.fusion_mode,
-                    args.seed
-                )
-                futures[fut] = (d, model_paths)
-
-            finished = 0
-            for fut in as_completed(futures):
-                d, model_paths = futures[fut]
-                try:
-                    result = fut.result()
-                except Exception as e:
-                    raise RuntimeError(
-                        f"设备 {d} 推理失败（负责模型数={len(model_paths)}）"
-                    ) from e
-                finished += 1
-                print(f"[INFO] 设备任务完成 ({finished}/{len(device_tasks)}): {result['device']}")
-                for out in result["outputs"]:
-                    per_model_outputs[path_to_idx[out["model_path"]]] = out
-
-    if any(x is None for x in per_model_outputs):
-        raise RuntimeError("存在模型未完成推理，无法汇总输出")
-
-    per_model_cls = np.stack([x["cls_prob"] for x in per_model_outputs], axis=0)
-    per_model_reg = np.stack([x["reg_pred"] for x in per_model_outputs], axis=0)
 
     out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
-    # 保留输入 CSV 的全部原始列，便于后续 active_select 与回溯
-    df_out = df_in.copy()
-    for i in range(len(paths)):
-        df_out[f"model{i+1}_cls_prob"] = per_model_cls[i]
-        df_out[f"model{i+1}_barrier"] = per_model_reg[i]
-    df_out.to_csv(args.output, index=False)
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    task_queues = []
+    workers = []
+
+    try:
+        for worker_id, (d, model_paths) in enumerate(device_tasks):
+            task_queue = ctx.Queue(maxsize=1)
+            proc = ctx.Process(
+                target=infer_worker,
+                args=(
+                    worker_id,
+                    d,
+                    model_paths,
+                    task_queue,
+                    result_queue,
+                    model_cfg,
+                    args.bs,
+                    per_proc_num_worker,
+                    args.fusion_mode,
+                    args.seed,
+                ),
+            )
+            proc.start()
+            task_queues.append(task_queue)
+            workers.append(proc)
+
+        wrote_header = False
+        total_rows = 0
+        chunk_count = 0
+        for chunk_idx, df_chunk in enumerate(pd.read_csv(args.input, chunksize=args.chunk_size), start=1):
+            chunk_count += 1
+            if df_chunk[reaction_col].isna().any():
+                raise ValueError(f"第 {chunk_idx} 个 chunk 的反应列 {reaction_col} 存在空值，请先清理")
+
+            reactions = df_chunk[reaction_col].astype(str).tolist()
+            if not reactions:
+                continue
+
+            print(
+                f"[INFO] chunk {chunk_idx}: rows={len(reactions)}, "
+                f"total_before={total_rows}",
+                flush=True
+            )
+            for task_queue in task_queues:
+                task_queue.put((chunk_idx, reactions))
+
+            per_model_outputs = [None] * len(paths)
+            received = 0
+            while received < len(workers):
+                try:
+                    result = result_queue.get(timeout=60)
+                except queue.Empty:
+                    dead = [
+                        f"worker={idx}, exitcode={proc.exitcode}"
+                        for idx, proc in enumerate(workers)
+                        if not proc.is_alive() and proc.exitcode is not None
+                    ]
+                    if dead:
+                        raise RuntimeError("推理 worker 异常退出: " + "; ".join(dead))
+                    continue
+
+                if result.get("status") == "error":
+                    raise RuntimeError(
+                        f"worker={result.get('worker_id')} device={result.get('device_id')} "
+                        f"推理失败: {result.get('error')}"
+                    )
+                if result["chunk_idx"] != chunk_idx:
+                    raise RuntimeError(
+                        f"收到错位 chunk 结果: expected={chunk_idx}, got={result['chunk_idx']}"
+                    )
+
+                received += 1
+                for out in result["outputs"]:
+                    per_model_outputs[path_to_idx[out["model_path"]]] = out
+
+            if any(x is None for x in per_model_outputs):
+                raise RuntimeError(f"第 {chunk_idx} 个 chunk 存在模型未完成推理，无法写出")
+
+            for i, out in enumerate(per_model_outputs):
+                df_chunk[f"model{i+1}_cls_prob"] = out["cls_prob"]
+                df_chunk[f"model{i+1}_barrier"] = out["reg_pred"]
+
+            df_chunk.to_csv(
+                args.output,
+                mode="w" if not wrote_header else "a",
+                header=not wrote_header,
+                index=False,
+            )
+            wrote_header = True
+            total_rows += len(df_chunk)
+            print(f"[INFO] chunk {chunk_idx} 写出完成，累计行数={total_rows}", flush=True)
+
+        if chunk_count == 0:
+            raise ValueError("未读取到任何反应 SMILES")
+    finally:
+        for task_queue in task_queues:
+            try:
+                task_queue.put_nowait(None)
+            except Exception:
+                pass
+        for proc in workers:
+            proc.join(timeout=30)
+        for proc in workers:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=10)
 
     print(f"[INFO] 预测完成，保存至 {args.output}")
     print(f"[INFO] 使用 fusion_mode: {args.fusion_mode}")
