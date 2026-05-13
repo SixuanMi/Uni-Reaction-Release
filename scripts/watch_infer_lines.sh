@@ -201,7 +201,9 @@ infer_one_file() {
   fi
   trap 'rm -rf "${lock_dir}"' RETURN
 
-  rm -f "${tmp_output}"
+  if [[ -s "${tmp_output}" ]]; then
+    log "[RESUME] ${base} from ${tmp_output}"
+  fi
   log "[RUN ] ${base} -> ${output_path}"
   local infer_args=(
     --input "${input_path}"
@@ -232,8 +234,7 @@ infer_one_file() {
     log "[DONE] ${base} -> ${output_path}"
   else
     local status=$?
-    rm -f "${tmp_output}"
-    log "[FAIL] ${base}, exit=${status}"
+    log "[FAIL] ${base}, exit=${status}; kept tmp for resume: ${tmp_output}"
     return "${status}"
   fi
 

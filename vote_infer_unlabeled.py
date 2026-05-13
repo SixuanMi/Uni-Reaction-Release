@@ -280,6 +280,102 @@ def build_device_tasks(
     return device_tasks
 
 
+def expected_output_columns(input_columns: List[str], n_models: int) -> List[str]:
+    columns = list(input_columns)
+    for i in range(n_models):
+        columns.append(f"model{i+1}_cls_prob")
+        columns.append(f"model{i+1}_barrier")
+    return columns
+
+
+def count_csv_data_rows(path: str) -> int:
+    with open(path, "rb") as f:
+        line_count = sum(1 for _ in f)
+    return max(0, line_count - 1)
+
+
+def truncate_csv_data_rows(path: str, data_rows: int) -> None:
+    tmp_path = f"{path}.truncate_tmp"
+    keep_lines = data_rows + 1
+    with open(path, "rb") as src, open(tmp_path, "wb") as dst:
+        for idx, line in enumerate(src):
+            if idx >= keep_lines:
+                break
+            dst.write(line)
+    os.replace(tmp_path, path)
+
+
+def read_progress_rows(progress_path: str) -> Optional[int]:
+    if not os.path.exists(progress_path):
+        return None
+    with open(progress_path, "r", encoding="utf-8") as f:
+        value = f.read().strip()
+    if not value:
+        return None
+    return int(value)
+
+
+def write_progress_rows(progress_path: str, rows: int) -> None:
+    tmp_path = f"{progress_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(f"{rows}\n")
+    os.replace(tmp_path, progress_path)
+
+
+def get_resume_rows(
+    output_path: str,
+    progress_path: str,
+    expected_columns: List[str],
+    resume_output: bool
+) -> int:
+    if not resume_output or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        return 0
+
+    existing_header = list(pd.read_csv(output_path, nrows=0).columns)
+    if existing_header != expected_columns:
+        raise ValueError(
+            f"已有输出文件列不匹配，不能断点续算: {output_path}。"
+            "请删除旧 tmp 或使用新的 output 路径。"
+        )
+
+    progress_rows = read_progress_rows(progress_path)
+    if progress_rows is not None:
+        actual_rows = count_csv_data_rows(output_path)
+        if actual_rows < progress_rows:
+            raise ValueError(
+                f"断点进度大于已有输出行数: progress={progress_rows}, actual={actual_rows}。"
+                "请删除旧 tmp/progress 后重跑。"
+            )
+        if actual_rows > progress_rows:
+            print(
+                f"[WARN] 已有输出行数({actual_rows})超过断点进度({progress_rows})，"
+                "将截断到上一个完整 chunk 后继续",
+                flush=True,
+            )
+            truncate_csv_data_rows(output_path, progress_rows)
+        return progress_rows
+    return count_csv_data_rows(output_path)
+
+
+def iter_input_chunks(
+    input_path: str,
+    input_columns: List[str],
+    chunk_size: int,
+    skip_data_rows: int
+):
+    if skip_data_rows <= 0:
+        yield from pd.read_csv(input_path, chunksize=chunk_size)
+        return
+
+    yield from pd.read_csv(
+        input_path,
+        names=input_columns,
+        header=None,
+        skiprows=skip_data_rows + 1,
+        chunksize=chunk_size,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser("无标签反应列表的投票预测（CSV 输入输出）")
     parser.add_argument("--input", required=True, help="输入 CSV 路径")
@@ -298,6 +394,11 @@ def main():
         type=int,
         default=200000,
         help="CSV 流式推理块大小；越小越省内存但调度开销越大"
+    )
+    parser.add_argument(
+        "--no_resume_output",
+        action="store_true",
+        help="禁用从已有输出 CSV/tmp 断点续算，重新覆盖输出"
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--devices", type=str, default=None, help="逗号分隔设备ID，如 0,1,2；用于多卡并行推理")
@@ -333,6 +434,7 @@ def main():
 
     df_header = pd.read_csv(args.input, nrows=0)
     reaction_col = resolve_reaction_column(df_header, args.reaction_col)
+    input_columns = list(df_header.columns)
     print(f"[INFO] 反应列: {reaction_col}")
 
     paths = collect_model_paths(args.model_paths, args.main_dir)
@@ -363,6 +465,20 @@ def main():
     out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
+    progress_path = f"{args.output}.progress"
+    expected_columns = expected_output_columns(input_columns, len(paths))
+    resume_rows = get_resume_rows(
+        output_path=args.output,
+        progress_path=progress_path,
+        expected_columns=expected_columns,
+        resume_output=not args.no_resume_output,
+    )
+    if args.no_resume_output and os.path.exists(args.output):
+        os.remove(args.output)
+    if args.no_resume_output and os.path.exists(progress_path):
+        os.remove(progress_path)
+    if resume_rows > 0:
+        print(f"[INFO] 断点续算: 已完成行数={resume_rows}，将跳过输入前 {resume_rows} 行", flush=True)
 
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
@@ -391,10 +507,14 @@ def main():
             task_queues.append(task_queue)
             workers.append(proc)
 
-        wrote_header = False
-        total_rows = 0
+        wrote_header = resume_rows > 0
+        total_rows = resume_rows
         chunk_count = 0
-        for chunk_idx, df_chunk in enumerate(pd.read_csv(args.input, chunksize=args.chunk_size), start=1):
+        start_chunk_idx = (resume_rows // args.chunk_size) + 1
+        for chunk_idx, df_chunk in enumerate(
+            iter_input_chunks(args.input, input_columns, args.chunk_size, resume_rows),
+            start=start_chunk_idx,
+        ):
             chunk_count += 1
             if df_chunk[reaction_col].isna().any():
                 raise ValueError(f"第 {chunk_idx} 个 chunk 的反应列 {reaction_col} 存在空值，请先清理")
@@ -455,6 +575,7 @@ def main():
             )
             wrote_header = True
             total_rows += len(df_chunk)
+            write_progress_rows(progress_path, total_rows)
             print(f"[INFO] chunk {chunk_idx} 写出完成，累计行数={total_rows}", flush=True)
 
         if chunk_count == 0:
@@ -473,6 +594,8 @@ def main():
                 proc.join(timeout=10)
 
     print(f"[INFO] 预测完成，保存至 {args.output}")
+    if os.path.exists(progress_path):
+        os.remove(progress_path)
     print(f"[INFO] 使用 fusion_mode: {args.fusion_mode}")
 
 
